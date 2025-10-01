@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -19,6 +20,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/libp2p/go-libp2p/core/pnet"
 	"github.com/libp2p/go-libp2p/p2p/discovery/mdns"
 	"github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/proto"
 	drouting "github.com/libp2p/go-libp2p/p2p/discovery/routing"
@@ -102,6 +104,7 @@ func (n *discoveryNotifee) HandlePeerFound(pi peer.AddrInfo) {
 func main() {
 	name := flag.String("name", "", "Your node name")
 	bootstrap := flag.String("bootstrap", "", "Comma-separated list of bootstrap node multiaddrs (overrides defaults)")
+	pskString := flag.String("psk", "", "Preshared key for private network (hex encoded, 64 characters)")
 	flag.Parse()
 
 	if *name == "" {
@@ -118,9 +121,19 @@ func main() {
 		bootstrapPeers = bootstrapNodes
 	}
 
+	var psk pnet.PSK
+	if *pskString != "" {
+		var err error
+		psk, err = parsePSK(*pskString)
+		if err != nil {
+			log.Fatalf("Failed to parse PSK: %v", err)
+		}
+		fmt.Println("Using private network with preshared key")
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 
-	h, err := createHost(ctx)
+	h, err := createHost(ctx, psk)
 	if err != nil {
 		log.Fatalf("Failed to create host: %v", err)
 	}
@@ -216,8 +229,8 @@ func main() {
 	}
 }
 
-func createHost(ctx context.Context) (host.Host, error) {
-	return libp2p.New(
+func createHost(ctx context.Context, psk pnet.PSK) (host.Host, error) {
+	opts := []libp2p.Option{
 		libp2p.ListenAddrStrings(
 			"/ip4/0.0.0.0/tcp/0",
 			"/ip6/::/tcp/0",
@@ -225,7 +238,33 @@ func createHost(ctx context.Context) (host.Host, error) {
 		libp2p.EnableNATService(),
 		libp2p.EnableHolePunching(),
 		libp2p.EnableRelay(),
-	)
+	}
+
+	if psk != nil {
+		opts = append(opts, libp2p.PrivateNetwork(psk))
+	}
+
+	return libp2p.New(opts...)
+}
+
+func parsePSK(s string) (pnet.PSK, error) {
+	s = strings.TrimSpace(s)
+	s = strings.TrimPrefix(s, "0x")
+	s = strings.TrimPrefix(s, "0X")
+
+	data, err := hex.DecodeString(s)
+	if err != nil {
+		return nil, fmt.Errorf("decoding hex PSK: %w", err)
+	}
+
+	if len(data) != 32 {
+		return nil, fmt.Errorf("PSK must be 32 bytes (64 hex characters), got %d bytes", len(data))
+	}
+
+	var psk [32]byte
+	copy(psk[:], data)
+
+	return psk[:], nil
 }
 
 func connectToBootstrapNodes(ctx context.Context, h host.Host, bootstrapPeers []string) {
