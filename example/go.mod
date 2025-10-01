@@ -4,7 +4,7 @@ go 1.25.1
 
 require (
 	github.com/ordishs/gocore v1.0.81
-	github.com/ordishs/p2p_poc v0.0.0
+	github.com/bsv-blockchain/go-p2p-message-bus v0.0.0
 )
 
 require (
@@ -125,4 +125,4 @@ require (
 	lukechampine.com/blake3 v1.4.1 // indirect
 )
 
-replace github.com/ordishs/p2p_poc => ../
+replace github.com/bsv-blockchain/go-p2p-message-bus => ../

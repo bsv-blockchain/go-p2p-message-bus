@@ -13,7 +13,7 @@ A simple, channel-based peer-to-peer messaging library built on libp2p.
 ## Installation
 
 ```bash
-go get github.com/ordishs/p2p_poc
+go get github.com/bsv-blockchain/go-p2p-message-bus
 ```
 
 ## Quick Start
@@ -25,7 +25,7 @@ import (
     "fmt"
     "log"
 
-    "github.com/ordishs/p2p_poc"
+    "github.com/bsv-blockchain/go-p2p-message-bus"
 )
 
 func main() {
