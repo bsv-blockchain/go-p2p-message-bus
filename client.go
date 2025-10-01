@@ -117,6 +117,9 @@ func NewClient(config Config) (P2PClient, error) {
 				}
 			}
 		}
+		if len(publicAddrs) > 0 {
+			logger.Infof("Using advertising addresses: %v", publicAddrs[0])
+		}
 		return publicAddrs
 	}
 
