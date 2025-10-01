@@ -244,7 +244,7 @@ func (c *Client) Subscribe(topic string) <-chan Message {
 }
 
 // Publish publishes a message to the specified topic.
-func (c *Client) Publish(topic string, data []byte) error {
+func (c *Client) Publish(ctx context.Context, topic string, data []byte) error {
 	t, ok := c.topics[topic]
 	if !ok {
 		var err error
@@ -269,7 +269,7 @@ func (c *Client) Publish(topic string, data []byte) error {
 		return fmt.Errorf("failed to marshal message: %w", err)
 	}
 
-	return t.Publish(c.ctx, msgBytes)
+	return t.Publish(ctx, msgBytes)
 }
 
 // GetPeers returns information about all known peers on subscribed topics.
