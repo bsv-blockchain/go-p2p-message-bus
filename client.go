@@ -706,6 +706,7 @@ func PrivateKeyFromHex(keyHex string) (crypto.PrivKey, error) {
 
 // Function to check if an IP address is private
 func isPrivateIP(config Config, addr multiaddr.Multiaddr) bool {
+	config.Logger.Infof("Multiaddr: %s", addr.String())
 	ipStr, err := extractIPFromMultiaddr(addr)
 	if err != nil {
 		return false
