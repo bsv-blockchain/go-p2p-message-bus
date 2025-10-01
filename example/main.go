@@ -20,6 +20,7 @@ func main() {
 	privateKey := flag.String("key", "", "Private key hex (will generate if not provided)")
 	topics := flag.String("topics", "broadcast_p2p_poc", "Comma-separated list of topics to subscribe to")
 	noBroadcast := flag.Bool("no-broadcast", false, "Disable message broadcasting")
+	prettyJson := flag.Bool("pretty-json", false, "Pretty print JSON messages")
 
 	flag.Parse()
 
@@ -102,11 +103,15 @@ func main() {
 		for msg := range allMsgChan {
 			var data string
 
-			// Try to unmarshal and re-marshal for pretty printing
-			var jsonObj interface{}
-			if err := json.Unmarshal(msg.Data, &jsonObj); err == nil {
-				if jsonBytes, err := json.MarshalIndent(jsonObj, "", "  "); err == nil {
-					data = string(jsonBytes)
+			if *prettyJson {
+				// Try to unmarshal and re-marshal for pretty printing
+				var jsonObj interface{}
+				if err := json.Unmarshal(msg.Data, &jsonObj); err == nil {
+					if jsonBytes, err := json.MarshalIndent(jsonObj, "", "  "); err == nil {
+						data = string(jsonBytes)
+					} else {
+						data = string(msg.Data)
+					}
 				} else {
 					data = string(msg.Data)
 				}
