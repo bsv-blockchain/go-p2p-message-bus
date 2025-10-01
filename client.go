@@ -729,9 +729,9 @@ func isPrivateIP(config Config, addr multiaddr.Multiaddr) bool {
 		// IPv6
 		{IP: net.ParseIP("fc00::"), Mask: net.CIDRMask(7, 128)},  // Unique local address
 		{IP: net.ParseIP("fe80::"), Mask: net.CIDRMask(10, 128)}, // Link-local unicast
-		{IP: net.ParseIP("::1"), Mask: net.CIDRMask(128, 128)},   // Loopback
+		{IP: net.IPv6loopback, Mask: net.CIDRMask(128, 128)},     // Loopback	}
 	}
-
+	
 	// Check if the IP falls into any of the private ranges
 	for _, r := range privateRanges {
 		if r.Contains(ip) {
