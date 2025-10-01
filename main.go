@@ -17,8 +17,10 @@ import (
 	dht "github.com/libp2p/go-libp2p-kad-dht"
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
 	"github.com/libp2p/go-libp2p/core/host"
+	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/p2p/discovery/mdns"
+	"github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/proto"
 	drouting "github.com/libp2p/go-libp2p/p2p/discovery/routing"
 	"github.com/multiformats/go-multiaddr"
 )
@@ -31,13 +33,16 @@ type Message struct {
 }
 
 type PeerTracker struct {
-	mu    sync.RWMutex
-	names map[peer.ID]string
+	mu          sync.RWMutex
+	names       map[peer.ID]string
+	relayCount  int
+	isRelaying  map[string]bool
 }
 
 func NewPeerTracker() *PeerTracker {
 	return &PeerTracker{
-		names: make(map[peer.ID]string),
+		names:      make(map[peer.ID]string),
+		isRelaying: make(map[string]bool),
 	}
 }
 
@@ -54,6 +59,24 @@ func (pt *PeerTracker) GetName(peerID peer.ID) string {
 		return name
 	}
 	return "unknown"
+}
+
+func (pt *PeerTracker) RecordRelay(srcPeer, dstPeer peer.ID) {
+	pt.mu.Lock()
+	defer pt.mu.Unlock()
+
+	key := srcPeer.String() + "->" + dstPeer.String()
+	if !pt.isRelaying[key] {
+		pt.isRelaying[key] = true
+		pt.relayCount++
+		fmt.Printf("\n[RELAY] Acting as relay: %s -> %s (total relays: %d)\n\n", srcPeer.String()[:16], dstPeer.String()[:16], pt.relayCount)
+	}
+}
+
+func (pt *PeerTracker) GetRelayCount() int {
+	pt.mu.RLock()
+	defer pt.mu.RUnlock()
+	return pt.relayCount
 }
 
 var bootstrapNodes = []string{
@@ -78,10 +101,21 @@ func (n *discoveryNotifee) HandlePeerFound(pi peer.AddrInfo) {
 
 func main() {
 	name := flag.String("name", "", "Your node name")
+	bootstrap := flag.String("bootstrap", "", "Comma-separated list of bootstrap node multiaddrs (overrides defaults)")
 	flag.Parse()
 
 	if *name == "" {
 		log.Fatal("--name flag is required")
+	}
+
+	var bootstrapPeers []string
+	if *bootstrap != "" {
+		bootstrapPeers = strings.Split(*bootstrap, ",")
+		for i, addr := range bootstrapPeers {
+			bootstrapPeers[i] = strings.TrimSpace(addr)
+		}
+	} else {
+		bootstrapPeers = bootstrapNodes
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -103,7 +137,7 @@ func main() {
 		log.Fatalf("Failed to bootstrap DHT: %v", err)
 	}
 
-	connectToBootstrapNodes(ctx, h, bootstrapNodes)
+	connectToBootstrapNodes(ctx, h, bootstrapPeers)
 
 	ps, err := pubsub.NewGossipSub(ctx, h)
 	if err != nil {
@@ -138,6 +172,12 @@ func main() {
 	}()
 
 	peerTracker := NewPeerTracker()
+
+	h.Network().Notify(&network.NotifyBundle{
+		ConnectedF: func(n network.Network, conn network.Conn) {
+			monitorRelayActivity(conn, peerTracker)
+		},
+	})
 
 	go discoverPeers(ctx, h, routingDiscovery)
 
@@ -320,7 +360,8 @@ func printPeersPeriodically(ctx context.Context, h host.Host, topic *pubsub.Topi
 			allPeers := h.Network().Peers()
 			topicPeers := topic.ListPeers()
 
-			fmt.Printf("\n[Total connections: %d | Topic peers: %d]\n", len(allPeers), len(topicPeers))
+			relayCount := tracker.GetRelayCount()
+			fmt.Printf("\n[Total connections: %d | Topic peers: %d | Acting as relay: %d]\n", len(allPeers), len(topicPeers), relayCount)
 			if len(topicPeers) > 0 {
 				fmt.Println("Topic peers:")
 				for _, p := range topicPeers {
@@ -351,4 +392,22 @@ func printPeersPeriodically(ctx context.Context, h host.Host, topic *pubsub.Topi
 
 func isRelayedConnection(addr string) bool {
 	return strings.Contains(addr, "/p2p-circuit/")
+}
+
+func monitorRelayActivity(conn network.Conn, tracker *PeerTracker) {
+	go func() {
+		streams := conn.GetStreams()
+		for _, stream := range streams {
+			protocol := stream.Protocol()
+			if protocol == proto.ProtoIDv2Hop || protocol == proto.ProtoIDv2Stop {
+				localAddr := conn.LocalMultiaddr().String()
+				remoteAddr := conn.RemoteMultiaddr().String()
+
+				if strings.Contains(localAddr, "/p2p-circuit/") || strings.Contains(remoteAddr, "/p2p-circuit/") {
+					remotePeer := conn.RemotePeer()
+					tracker.RecordRelay(remotePeer, remotePeer)
+				}
+			}
+		}
+	}()
 }
