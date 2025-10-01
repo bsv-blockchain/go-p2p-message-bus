@@ -276,16 +276,6 @@ func (c *Client) GetPeers() []PeerInfo {
 	return peers
 }
 
-// GetPrivateKeyHex returns the hex-encoded private key for this peer.
-// This can be saved and used in Config.PrivateKey to maintain the same peer ID across restarts.
-func (c *Client) GetPrivateKeyHex() (string, error) {
-	priv := c.host.Peerstore().PrivKey(c.host.ID())
-	if priv == nil {
-		return "", fmt.Errorf("private key not found in peerstore")
-	}
-	return PrivateKeyToHex(priv)
-}
-
 // Close shuts down the client and releases all resources.
 func (c *Client) Close() error {
 	c.cancel()
@@ -581,4 +571,12 @@ func PrivateKeyFromHex(keyHex string) (crypto.PrivKey, error) {
 	}
 
 	return priv, nil
+}
+
+func keyToHex(priv crypto.PrivKey) string {
+	keyBytes, err := crypto.MarshalPrivateKey(priv)
+	if err != nil {
+		return ""
+	}
+	return hex.EncodeToString(keyBytes)
 }
