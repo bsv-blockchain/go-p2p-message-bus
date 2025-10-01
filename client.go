@@ -163,10 +163,11 @@ func NewClient(config Config) (P2PClient, error) {
 			fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", config.Port), // Listen on all interfaces
 			fmt.Sprintf("/ip6/::/tcp/%d", config.Port),
 		),
-		libp2p.EnableNATService(),
-		libp2p.EnableHolePunching(),
-		libp2p.EnableRelay(),
-		libp2p.EnableAutoRelayWithStaticRelays([]peer.AddrInfo{}), // Enable auto relay discovery via DHT
+		libp2p.NATPortMap(),                                       // Try UPnP/NAT-PMP for automatic port forwarding
+		libp2p.EnableNATService(),                                 // AutoNAT to detect if we're reachable
+		libp2p.EnableHolePunching(),                               // DCUtR protocol for NAT hole punching
+		libp2p.EnableRelay(),                                      // Act as relay for others
+		libp2p.EnableAutoRelayWithStaticRelays([]peer.AddrInfo{}), // Use relays if we're unreachable
 		libp2p.AddrsFactory(addressFactory),
 		libp2p.ConnectionGater(ipFilter),
 	)
