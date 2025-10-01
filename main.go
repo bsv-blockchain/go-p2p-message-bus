@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -24,14 +25,24 @@ import (
 	"github.com/libp2p/go-libp2p/p2p/discovery/mdns"
 	drouting "github.com/libp2p/go-libp2p/p2p/discovery/routing"
 	"github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/proto"
+	"github.com/libp2p/go-libp2p/p2p/protocol/holepunch"
 	"github.com/multiformats/go-multiaddr"
 )
 
-const topicName = "broadcast_p2p_poc"
+const (
+	topicName      = "broadcast_p2p_poc"
+	peerCacheFile  = "peer_cache.json"
+)
 
 type Message struct {
 	Name    string `json:"name"`
 	Counter int    `json:"counter"`
+}
+
+type CachedPeer struct {
+	ID    string   `json:"id"`
+	Name  string   `json:"name,omitempty"`
+	Addrs []string `json:"addrs"`
 }
 
 type PeerTracker struct {
@@ -152,6 +163,12 @@ func main() {
 
 	connectToBootstrapNodes(ctx, h, bootstrapPeers)
 
+	cachedPeers := loadPeerCache()
+	if len(cachedPeers) > 0 {
+		fmt.Printf("Connecting to %d cached peers...\n", len(cachedPeers))
+		connectToCachedPeers(ctx, h, cachedPeers)
+	}
+
 	ps, err := pubsub.NewGossipSub(ctx, h)
 	if err != nil {
 		log.Fatalf("Failed to create pubsub: %v", err)
@@ -195,8 +212,15 @@ func main() {
 	h.Network().Notify(&network.NotifyBundle{
 		ConnectedF: func(n network.Network, conn network.Conn) {
 			monitorRelayActivity(conn, peerTracker)
+			monitorConnectionUpgrade(conn)
+		},
+		DisconnectedF: func(n network.Network, conn network.Conn) {
+			fmt.Printf("\n[DISCONNECTED] Lost connection to %s\n", conn.RemotePeer().String()[:16])
+			fmt.Printf("  Will attempt reconnection via cached peers and discovery...\n\n")
 		},
 	})
+
+	subscribeToHolePunchEvents(ctx, h)
 
 	go discoverPeers(ctx, h, routingDiscovery)
 
@@ -205,6 +229,8 @@ func main() {
 	go broadcastMessages(ctx, topic, *name)
 
 	go printPeersPeriodically(ctx, h, topic, peerTracker)
+
+	go maintainPeerConnections(ctx, h, topic)
 
 	fmt.Println("Press Ctrl+C to exit")
 
@@ -407,14 +433,19 @@ func printPeersPeriodically(ctx context.Context, h host.Host, topic *pubsub.Topi
 
 			relayCount := tracker.GetRelayCount()
 			fmt.Printf("\n[Total connections: %d | Topic peers: %d | Acting as relay: %d]\n", len(allPeers), len(topicPeers), relayCount)
+
+			var cachedPeers []CachedPeer
 			if len(topicPeers) > 0 {
 				fmt.Println("Topic peers:")
 				for _, p := range topicPeers {
 					name := tracker.GetName(p)
 					conns := h.Network().ConnsToPeer(p)
 
+					var peerAddrs []string
 					for _, conn := range conns {
 						addr := conn.RemoteMultiaddr().String()
+						peerAddrs = append(peerAddrs, addr)
+
 						connType := "DIRECT"
 						if isRelayedConnection(addr) {
 							connType = "RELAYED"
@@ -425,8 +456,16 @@ func printPeersPeriodically(ctx context.Context, h host.Host, topic *pubsub.Topi
 
 					if len(conns) == 0 {
 						fmt.Printf("  - %s (%s) [NO CONNECTION]\n", p.String(), name)
+					} else {
+						cachedPeers = append(cachedPeers, CachedPeer{
+							ID:    p.String(),
+							Name:  name,
+							Addrs: peerAddrs,
+						})
 					}
 				}
+
+				savePeerCache(cachedPeers)
 			} else {
 				fmt.Println("  (No peers on topic yet)")
 			}
@@ -437,6 +476,81 @@ func printPeersPeriodically(ctx context.Context, h host.Host, topic *pubsub.Topi
 
 func isRelayedConnection(addr string) bool {
 	return strings.Contains(addr, "/p2p-circuit/")
+}
+
+func loadPeerCache() []CachedPeer {
+	file, err := os.Open(peerCacheFile)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Printf("Warning: failed to open peer cache: %v", err)
+		}
+		return nil
+	}
+	defer file.Close()
+
+	data, err := io.ReadAll(file)
+	if err != nil {
+		log.Printf("Warning: failed to read peer cache: %v", err)
+		return nil
+	}
+
+	var peers []CachedPeer
+	if err := json.Unmarshal(data, &peers); err != nil {
+		log.Printf("Warning: failed to parse peer cache: %v", err)
+		return nil
+	}
+
+	return peers
+}
+
+func savePeerCache(peers []CachedPeer) {
+	data, err := json.MarshalIndent(peers, "", "  ")
+	if err != nil {
+		log.Printf("Warning: failed to marshal peer cache: %v", err)
+		return
+	}
+
+	if err := os.WriteFile(peerCacheFile, data, 0644); err != nil {
+		log.Printf("Warning: failed to write peer cache: %v", err)
+	}
+}
+
+func connectToCachedPeers(ctx context.Context, h host.Host, cachedPeers []CachedPeer) {
+	for _, cp := range cachedPeers {
+		peerID, err := peer.Decode(cp.ID)
+		if err != nil {
+			log.Printf("Invalid cached peer ID %s: %v", cp.ID, err)
+			continue
+		}
+
+		if h.Network().Connectedness(peerID) == network.Connected {
+			continue
+		}
+
+		var maddrs []multiaddr.Multiaddr
+		for _, addrStr := range cp.Addrs {
+			maddr, err := multiaddr.NewMultiaddr(addrStr)
+			if err != nil {
+				continue
+			}
+			maddrs = append(maddrs, maddr)
+		}
+
+		if len(maddrs) == 0 {
+			continue
+		}
+
+		addrInfo := peer.AddrInfo{
+			ID:    peerID,
+			Addrs: maddrs,
+		}
+
+		go func(ai peer.AddrInfo) {
+			if err := h.Connect(ctx, ai); err == nil {
+				fmt.Printf("Reconnected to cached peer: %s\n", ai.ID.String())
+			}
+		}(addrInfo)
+	}
 }
 
 func monitorRelayActivity(conn network.Conn, tracker *PeerTracker) {
@@ -455,4 +569,109 @@ func monitorRelayActivity(conn network.Conn, tracker *PeerTracker) {
 			}
 		}
 	}()
+}
+
+func monitorConnectionUpgrade(conn network.Conn) {
+	addr := conn.RemoteMultiaddr().String()
+	if strings.Contains(addr, "/p2p-circuit/") {
+		fmt.Printf("\n[RELAY CONNECTION] Connected via relay to %s\n", conn.RemotePeer().String()[:16])
+		fmt.Printf("  Waiting for hole punch to establish direct connection...\n\n")
+	}
+}
+
+func subscribeToHolePunchEvents(ctx context.Context, h host.Host) {
+	bus := h.EventBus()
+
+	sub, err := bus.Subscribe(new(holepunch.Event))
+	if err != nil {
+		log.Printf("Warning: failed to subscribe to hole punch events: %v", err)
+		return
+	}
+
+	go func() {
+		defer sub.Close()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case evt := <-sub.Out():
+				hpEvt, ok := evt.(holepunch.Event)
+				if !ok {
+					continue
+				}
+
+				switch hpEvt.Type {
+				case "StartHolePunch":
+					fmt.Printf("\n[HOLE PUNCH] Starting hole punch with %s\n\n", hpEvt.Remote.String()[:16])
+				case "EndHolePunch":
+					fmt.Printf("\n[HOLE PUNCH] Completed attempt with %s (check connection type in peer list)\n\n", hpEvt.Remote.String()[:16])
+				case "HolePunchAttempt":
+					fmt.Printf("\n[HOLE PUNCH] Attempting direct connection to %s...\n\n", hpEvt.Remote.String()[:16])
+				}
+			}
+		}
+	}()
+}
+
+func maintainPeerConnections(ctx context.Context, h host.Host, topic *pubsub.Topic) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			topicPeers := topic.ListPeers()
+			cachedPeers := loadPeerCache()
+
+			for _, cp := range cachedPeers {
+				peerID, err := peer.Decode(cp.ID)
+				if err != nil {
+					continue
+				}
+
+				isTopicPeer := false
+				for _, tp := range topicPeers {
+					if tp == peerID {
+						isTopicPeer = true
+						break
+					}
+				}
+
+				if !isTopicPeer {
+					continue
+				}
+
+				connectedness := h.Network().Connectedness(peerID)
+				if connectedness == network.Connected {
+					continue
+				}
+
+				fmt.Printf("\n[RECONNECT] Attempting to reconnect to %s (%s)...\n", cp.Name, peerID.String()[:16])
+
+				var maddrs []multiaddr.Multiaddr
+				for _, addrStr := range cp.Addrs {
+					maddr, err := multiaddr.NewMultiaddr(addrStr)
+					if err != nil {
+						continue
+					}
+					maddrs = append(maddrs, maddr)
+				}
+
+				if len(maddrs) > 0 {
+					addrInfo := peer.AddrInfo{
+						ID:    peerID,
+						Addrs: maddrs,
+					}
+
+					if err := h.Connect(ctx, addrInfo); err != nil {
+						fmt.Printf("  Reconnection attempt failed: %v\n\n", err)
+					} else {
+						fmt.Printf("  Reconnected successfully!\n\n")
+					}
+				}
+			}
+		}
+	}
 }
