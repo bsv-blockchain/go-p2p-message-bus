@@ -712,6 +712,11 @@ func isPrivateIP(config Config, addr multiaddr.Multiaddr) bool {
 		return false
 	}
 	config.Logger.Infof("Extracted IP: %s", ipStr)
+	// Check for IPv6 loopback
+	if ipStr == "::1" {
+		return true
+	}
+
 	ip := net.ParseIP(ipStr)
 	if ip == nil || ip.To4() == nil {
 		return false
@@ -738,10 +743,7 @@ func isPrivateIP(config Config, addr multiaddr.Multiaddr) bool {
 			return true
 		}
 	}
-	if ip.Equal(net.IPv6loopback) { // ::1
-		config.Logger.Infof("Found IPv6 loopback: %s", ip)
-		return true
-	}
+
 	return false
 }
 
