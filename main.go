@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -21,7 +20,6 @@ import (
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
-	"github.com/libp2p/go-libp2p/core/pnet"
 	"github.com/libp2p/go-libp2p/p2p/discovery/mdns"
 	drouting "github.com/libp2p/go-libp2p/p2p/discovery/routing"
 	"github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/proto"
@@ -119,11 +117,6 @@ func (pt *PeerTracker) GetLastSeen(peerID peer.ID) time.Time {
 	return pt.lastSeen[peerID]
 }
 
-var bootstrapNodes = []string{
-	"/dnsaddr/bootstrap.libp2p.io/p2p/QmNnooDu7bfjPFoTZYxMNLWUQJyrVwtbZg5gBMjTezGAJN",
-	"/dnsaddr/bootstrap.libp2p.io/p2p/QmbLHAnMoJPWSCR5Zhtx6BHJX9KiKNN6tpvbUcqanj75Nb",
-}
-
 type discoveryNotifee struct {
 	h   host.Host
 	ctx context.Context
@@ -141,38 +134,15 @@ func (n *discoveryNotifee) HandlePeerFound(pi peer.AddrInfo) {
 
 func main() {
 	name := flag.String("name", "", "Your node name")
-	bootstrap := flag.String("bootstrap", "", "Comma-separated list of bootstrap node multiaddrs (overrides defaults)")
-	pskString := flag.String("psk", "", "Preshared key for private network (hex encoded, 64 characters)")
-	publicPeer := flag.Bool("public", false, "Run as public discovery peer (does not process topic messages)")
 	flag.Parse()
 
 	if *name == "" {
 		log.Fatal("--name flag is required")
 	}
 
-	var bootstrapPeers []string
-	if *bootstrap != "" {
-		bootstrapPeers = strings.Split(*bootstrap, ",")
-		for i, addr := range bootstrapPeers {
-			bootstrapPeers[i] = strings.TrimSpace(addr)
-		}
-	} else {
-		bootstrapPeers = bootstrapNodes
-	}
-
-	var psk pnet.PSK
-	if *pskString != "" {
-		var err error
-		psk, err = parsePSK(*pskString)
-		if err != nil {
-			log.Fatalf("Failed to parse PSK: %v", err)
-		}
-		fmt.Println("Using private network with preshared key")
-	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 
-	h, err := createHost(ctx, psk)
+	h, err := createHost(ctx)
 	if err != nil {
 		log.Fatalf("Failed to create host: %v", err)
 	}
@@ -180,7 +150,9 @@ func main() {
 	fmt.Printf("Host created. ID: %s\n", h.ID())
 	fmt.Printf("Listening on: %v\n", h.Addrs())
 
-	kadDHT, err := dht.New(ctx, h, dht.Mode(dht.ModeServer))
+	bootstrapPeers := dht.GetDefaultBootstrapPeerAddrInfos()
+
+	kadDHT, err := dht.New(ctx, h, dht.Mode(dht.ModeServer), dht.BootstrapPeers(bootstrapPeers...))
 	if err != nil {
 		log.Fatalf("Failed to create DHT: %v", err)
 	}
@@ -189,7 +161,13 @@ func main() {
 		log.Fatalf("Failed to bootstrap DHT: %v", err)
 	}
 
-	connectToBootstrapNodes(ctx, h, bootstrapPeers)
+	for _, peerInfo := range bootstrapPeers {
+		go func(pi peer.AddrInfo) {
+			if err := h.Connect(ctx, pi); err == nil {
+				fmt.Printf("Connected to bootstrap peer: %s\n", pi.ID.String())
+			}
+		}(peerInfo)
+	}
 
 	cachedPeers := loadPeerCache()
 	if len(cachedPeers) > 0 {
@@ -197,135 +175,114 @@ func main() {
 		connectToCachedPeers(ctx, h, cachedPeers)
 	}
 
-	var mdnsService mdns.Service
-	var topic *pubsub.Topic
-	var sub *pubsub.Subscription
+	ps, err := pubsub.NewGossipSub(ctx, h)
+	if err != nil {
+		log.Fatalf("Failed to create pubsub: %v", err)
+	}
 
-	if *publicPeer {
-		fmt.Println("Running as PUBLIC DISCOVERY PEER (not processing topic messages)")
+	topic, err := ps.Join(topicName)
+	if err != nil {
+		log.Fatalf("Failed to join topic: %v", err)
+	}
 
-		mdnsService = mdns.NewMdnsService(h, topicName, &discoveryNotifee{h: h, ctx: ctx})
-		if err := mdnsService.Start(); err != nil {
-			log.Printf("Warning: mDNS failed to start: %v", err)
-		} else {
-			fmt.Println("mDNS discovery started")
-		}
+	sub, err := topic.Subscribe()
+	if err != nil {
+		log.Fatalf("Failed to subscribe: %v", err)
+	}
 
-		routingDiscovery := drouting.NewRoutingDiscovery(kadDHT)
-		go func() {
-			time.Sleep(5 * time.Second)
-
-			_, err := routingDiscovery.Advertise(ctx, topicName)
-			if err != nil && ctx.Err() == nil {
-				if strings.Contains(err.Error(), "failed to find any peer in table") {
-					log.Printf("DHT routing table empty - peer discovery via mDNS or bootstrap nodes")
-				} else {
-					log.Printf("Failed to advertise: %v", err)
-				}
-			} else if err == nil {
-				fmt.Println("Announcing presence on DHT")
-			}
-		}()
-
-		go discoverPeers(ctx, h, routingDiscovery)
-
-		h.Network().Notify(&network.NotifyBundle{
-			ConnectedF: func(n network.Network, conn network.Conn) {
-				fmt.Printf("Peer connected: %s\n", conn.RemotePeer().String()[:16])
-			},
-			DisconnectedF: func(n network.Network, conn network.Conn) {
-				fmt.Printf("Peer disconnected: %s\n", conn.RemotePeer().String()[:16])
-			},
-		})
-
-		subscribeToHolePunchEvents(ctx, h)
-
-		go func() {
-			ticker := time.NewTicker(30 * time.Second)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-					allPeers := h.Network().Peers()
-					fmt.Printf("\n[PUBLIC PEER] Total connections: %d\n", len(allPeers))
-				}
-			}
-		}()
+	mdnsService := mdns.NewMdnsService(h, topicName, &discoveryNotifee{h: h, ctx: ctx})
+	if err := mdnsService.Start(); err != nil {
+		log.Printf("Warning: mDNS failed to start: %v", err)
 	} else {
-		ps, err := pubsub.NewGossipSub(ctx, h)
-		if err != nil {
-			log.Fatalf("Failed to create pubsub: %v", err)
-		}
+		fmt.Println("mDNS discovery started")
+	}
 
-		topic, err = ps.Join(topicName)
-		if err != nil {
-			log.Fatalf("Failed to join topic: %v", err)
-		}
+	routingDiscovery := drouting.NewRoutingDiscovery(kadDHT)
+	go func() {
+		ticker := time.NewTicker(500 * time.Millisecond)
+		defer ticker.Stop()
+		timeout := time.After(10 * time.Second)
 
-		sub, err = topic.Subscribe()
-		if err != nil {
-			log.Fatalf("Failed to subscribe: %v", err)
-		}
-
-		mdnsService = mdns.NewMdnsService(h, topicName, &discoveryNotifee{h: h, ctx: ctx})
-		if err := mdnsService.Start(); err != nil {
-			log.Printf("Warning: mDNS failed to start: %v", err)
-		} else {
-			fmt.Println("mDNS discovery started")
-		}
-
-		routingDiscovery := drouting.NewRoutingDiscovery(kadDHT)
-		go func() {
-			time.Sleep(5 * time.Second)
-
-			_, err := routingDiscovery.Advertise(ctx, topicName)
-			if err != nil && ctx.Err() == nil {
-				if strings.Contains(err.Error(), "failed to find any peer in table") {
-					log.Printf("DHT routing table empty - peer discovery via mDNS or bootstrap nodes")
-				} else {
-					log.Printf("Failed to advertise: %v", err)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-timeout:
+				log.Printf("Timeout waiting for DHT peers - will rely on mDNS and peer cache")
+				return
+			case <-ticker.C:
+				if len(kadDHT.RoutingTable().ListPeers()) > 0 {
+					_, err := routingDiscovery.Advertise(ctx, topicName)
+					if err != nil {
+						log.Printf("Failed to advertise: %v", err)
+					} else {
+						fmt.Println("Announcing presence on DHT")
+					}
+					return
 				}
-			} else if err == nil {
-				fmt.Println("Announcing presence on DHT")
 			}
-		}()
+		}
+	}()
 
-		peerTracker := NewPeerTracker()
+	peerTracker := NewPeerTracker()
 
-		h.Network().Notify(&network.NotifyBundle{
-			ConnectedF: func(n network.Network, conn network.Conn) {
-				monitorRelayActivity(conn, peerTracker)
-				monitorConnectionUpgrade(conn)
-			},
-			DisconnectedF: func(n network.Network, conn network.Conn) {
+	h.Network().Notify(&network.NotifyBundle{
+		ConnectedF: func(n network.Network, conn network.Conn) {
+			monitorRelayActivity(conn, peerTracker)
+			monitorConnectionUpgrade(conn)
+
+			go func() {
+				time.Sleep(500 * time.Millisecond)
 				peerID := conn.RemotePeer()
 				topicPeers := topic.ListPeers()
 				for _, tp := range topicPeers {
 					if tp == peerID {
-						fmt.Printf("\n[DISCONNECTED] Lost connection to topic peer %s\n", peerID.String()[:16])
-						fmt.Printf("  Will attempt reconnection via cached peers and discovery...\n\n")
+						name := peerTracker.GetName(peerID)
+						addr := conn.RemoteMultiaddr().String()
+
+						fmt.Printf("\n[CONNECTED] Topic peer %s [%s] %s\n\n", peerID.String(), name, addr)
+
+						var cachedPeers []CachedPeer
+						for _, p := range topicPeers {
+							if conns := h.Network().ConnsToPeer(p); len(conns) > 0 {
+								var addrs []string
+								for _, c := range conns {
+									addrs = append(addrs, c.RemoteMultiaddr().String())
+								}
+								cachedPeers = append(cachedPeers, CachedPeer{
+									ID:    p.String(),
+									Name:  peerTracker.GetName(p),
+									Addrs: addrs,
+								})
+							}
+						}
+						if len(cachedPeers) > 0 {
+							savePeerCache(cachedPeers)
+						}
 						return
 					}
 				}
-			},
-		})
+			}()
+		},
+		DisconnectedF: func(n network.Network, conn network.Conn) {
+			peerID := conn.RemotePeer()
+			topicPeers := topic.ListPeers()
+			for _, tp := range topicPeers {
+				if tp == peerID {
+					fmt.Printf("\n[DISCONNECTED] Lost connection to topic peer %s\n", peerID.String()[:16])
+					return
+				}
+			}
+		},
+	})
 
-		subscribeToHolePunchEvents(ctx, h)
+	subscribeToHolePunchEvents(ctx, h)
 
-		go discoverPeers(ctx, h, routingDiscovery)
+	go discoverPeers(ctx, h, routingDiscovery)
 
-		go receiveMessages(ctx, sub, h, peerTracker)
+	go receiveMessages(ctx, sub, h, peerTracker)
 
-		go broadcastMessages(ctx, topic, h, *name)
-
-		go printPeersPeriodically(ctx, h, topic, peerTracker)
-
-		go maintainPeerConnections(ctx, h, topic, kadDHT, true)
-
-		go maintainBootstrapConnections(ctx, h, bootstrapPeers)
-	}
+	go broadcastMessages(ctx, topic, h, *name)
 
 	fmt.Println("Press Ctrl+C to exit")
 
@@ -339,15 +296,9 @@ func main() {
 	shutdownDone := make(chan struct{})
 	go func() {
 		time.Sleep(100 * time.Millisecond)
-		if sub != nil {
-			sub.Cancel()
-		}
-		if topic != nil {
-			topic.Close()
-		}
-		if mdnsService != nil {
-			mdnsService.Close()
-		}
+		sub.Cancel()
+		topic.Close()
+		mdnsService.Close()
 		kadDHT.Close()
 		h.Close()
 		close(shutdownDone)
@@ -362,8 +313,8 @@ func main() {
 	}
 }
 
-func createHost(ctx context.Context, psk pnet.PSK) (host.Host, error) {
-	opts := []libp2p.Option{
+func createHost(ctx context.Context) (host.Host, error) {
+	return libp2p.New(
 		libp2p.ListenAddrStrings(
 			"/ip4/0.0.0.0/tcp/0",
 			"/ip6/::/tcp/0",
@@ -371,65 +322,7 @@ func createHost(ctx context.Context, psk pnet.PSK) (host.Host, error) {
 		libp2p.EnableNATService(),
 		libp2p.EnableHolePunching(),
 		libp2p.EnableRelay(),
-	}
-
-	if psk != nil {
-		opts = append(opts, libp2p.PrivateNetwork(psk))
-	}
-
-	return libp2p.New(opts...)
-}
-
-func parsePSK(s string) (pnet.PSK, error) {
-	s = strings.TrimSpace(s)
-	s = strings.TrimPrefix(s, "0x")
-	s = strings.TrimPrefix(s, "0X")
-
-	data, err := hex.DecodeString(s)
-	if err != nil {
-		return nil, fmt.Errorf("decoding hex PSK: %w", err)
-	}
-
-	if len(data) != 32 {
-		return nil, fmt.Errorf("PSK must be 32 bytes (64 hex characters), got %d bytes", len(data))
-	}
-
-	var psk [32]byte
-	copy(psk[:], data)
-
-	return psk[:], nil
-}
-
-func connectToBootstrapNodes(ctx context.Context, h host.Host, bootstrapPeers []string) {
-	var wg sync.WaitGroup
-
-	for _, addr := range bootstrapPeers {
-		wg.Add(1)
-
-		go func(addr string) {
-			defer wg.Done()
-
-			maddr, err := multiaddr.NewMultiaddr(addr)
-			if err != nil {
-				log.Printf("Failed to parse bootstrap address %s: %v", addr, err)
-				return
-			}
-
-			peerInfo, err := peer.AddrInfoFromP2pAddr(maddr)
-			if err != nil {
-				log.Printf("Failed to get peer info from %s: %v", addr, err)
-				return
-			}
-
-			if err := h.Connect(ctx, *peerInfo); err != nil {
-				log.Printf("Failed to connect to bootstrap node %s: %v", peerInfo.ID, err)
-			} else {
-				fmt.Printf("Connected to bootstrap node: %s\n", peerInfo.ID)
-			}
-		}(addr)
-	}
-
-	wg.Wait()
+	)
 }
 
 func discoverPeers(ctx context.Context, h host.Host, routingDiscovery *drouting.RoutingDiscovery) {
@@ -490,12 +383,13 @@ func receiveMessages(ctx context.Context, sub *pubsub.Subscription, h host.Host,
 
 		ipAddr := extractIPAddress(h, author)
 
+		relayStr := ""
+
 		if msg.ReceivedFrom != author {
 			relayIP := extractIPAddress(h, msg.ReceivedFrom)
-			fmt.Printf("[%s via relay %s] %s: %d\n", ipAddr, relayIP, m.Name, m.Counter)
-		} else {
-			fmt.Printf("[%s] %s: %d\n", ipAddr, m.Name, m.Counter)
+			relayStr = fmt.Sprintf("[via relay %s]", relayIP)
 		}
+		fmt.Printf("[%-20s] %-30s: %s %d\n", ipAddr, relayStr, m.Name, m.Counter)
 	}
 }
 
@@ -544,7 +438,7 @@ func broadcastMessages(ctx context.Context, topic *pubsub.Topic, h host.Host, na
 			if err := topic.Publish(ctx, data); err != nil {
 				log.Printf("Error publishing message: %v", err)
 			} else {
-				fmt.Printf("[%s] %s: %d\n", localIP, msg.Name, msg.Counter)
+				fmt.Printf("[%-20s] %-30s: %s %d\n", localIP, "", msg.Name, msg.Counter)
 			}
 		}
 	}
@@ -565,77 +459,6 @@ func getLocalIP(h host.Host) string {
 		}
 	}
 	return "localhost"
-}
-
-func printPeersPeriodically(ctx context.Context, h host.Host, topic *pubsub.Topic, tracker *PeerTracker) {
-	ticker := time.NewTicker(10 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			allPeers := h.Network().Peers()
-			meshPeers := topic.ListPeers()
-			allTopicPeers := tracker.GetAllTopicPeers()
-
-			meshPeerSet := make(map[peer.ID]bool)
-			for _, p := range meshPeers {
-				meshPeerSet[p] = true
-			}
-
-			relayCount := tracker.GetRelayCount()
-			fmt.Printf("\n[Total connections: %d | Topic peers: %d (in mesh: %d) | Acting as relay: %d]\n",
-				len(allPeers), len(allTopicPeers), len(meshPeers), relayCount)
-
-			var cachedPeers []CachedPeer
-			if len(allTopicPeers) > 0 {
-				fmt.Println("Topic peers:")
-				for _, p := range allTopicPeers {
-					name := tracker.GetName(p)
-					conns := h.Network().ConnsToPeer(p)
-					lastSeen := tracker.GetLastSeen(p)
-					timeSince := time.Since(lastSeen)
-
-					meshStatus := "NOT IN MESH"
-					if meshPeerSet[p] {
-						meshStatus = "IN MESH"
-					}
-
-					var peerAddrs []string
-					for _, conn := range conns {
-						addr := conn.RemoteMultiaddr().String()
-						peerAddrs = append(peerAddrs, addr)
-
-						connType := "DIRECT"
-						if isRelayedConnection(addr) {
-							connType = "RELAYED"
-						}
-
-						fmt.Printf("  - %s (%s) [%s] [%s] (last seen: %s ago) %s\n",
-							p.String()[:16], name, meshStatus, connType, timeSince.Round(time.Second), addr)
-					}
-
-					if len(conns) == 0 {
-						fmt.Printf("  - %s (%s) [%s] [NO CONNECTION] (last seen: %s ago)\n",
-							p.String()[:16], name, meshStatus, timeSince.Round(time.Second))
-					} else {
-						cachedPeers = append(cachedPeers, CachedPeer{
-							ID:    p.String(),
-							Name:  name,
-							Addrs: peerAddrs,
-						})
-					}
-				}
-
-				savePeerCache(cachedPeers)
-			} else {
-				fmt.Println("  (No peers on topic yet)")
-			}
-			fmt.Println()
-		}
-	}
 }
 
 func isRelayedConnection(addr string) bool {
@@ -775,106 +598,4 @@ func subscribeToHolePunchEvents(ctx context.Context, h host.Host) {
 			}
 		}
 	}()
-}
-
-func maintainPeerConnections(ctx context.Context, h host.Host, topic *pubsub.Topic, dhtInst *dht.IpfsDHT, checkImmediately bool) {
-	ticker := time.NewTicker(10 * time.Second)
-	defer ticker.Stop()
-
-	reconnectPeers := func() {
-		cachedPeers := loadPeerCache()
-
-		for _, cp := range cachedPeers {
-			peerID, err := peer.Decode(cp.ID)
-			if err != nil {
-				continue
-			}
-
-			connectedness := h.Network().Connectedness(peerID)
-			if connectedness == network.Connected {
-				continue
-			}
-
-			fmt.Printf("\n[RECONNECT] Attempting to reconnect to topic peer %s (%s)...\n", cp.Name, peerID.String()[:16])
-
-			connCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-			defer cancel()
-
-			peerInfo, err := dhtInst.FindPeer(connCtx, peerID)
-			if err != nil {
-				fmt.Printf("  DHT lookup failed: %v, trying cached addresses...\n", err)
-
-				var maddrs []multiaddr.Multiaddr
-				for _, addrStr := range cp.Addrs {
-					maddr, err := multiaddr.NewMultiaddr(addrStr)
-					if err != nil {
-						continue
-					}
-					maddrs = append(maddrs, maddr)
-				}
-
-				if len(maddrs) > 0 {
-					peerInfo = peer.AddrInfo{
-						ID:    peerID,
-						Addrs: maddrs,
-					}
-				} else {
-					fmt.Printf("  No valid addresses available\n\n")
-					continue
-				}
-			}
-
-			if err := h.Connect(connCtx, peerInfo); err != nil {
-				fmt.Printf("  Reconnection failed: %v\n\n", err)
-			} else {
-				fmt.Printf("  Reconnected successfully!\n\n")
-			}
-		}
-	}
-
-	if checkImmediately {
-		time.Sleep(2 * time.Second)
-		reconnectPeers()
-	}
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			reconnectPeers()
-		}
-	}
-}
-
-func maintainBootstrapConnections(ctx context.Context, h host.Host, bootstrapPeers []string) {
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			for _, addr := range bootstrapPeers {
-				maddr, err := multiaddr.NewMultiaddr(addr)
-				if err != nil {
-					continue
-				}
-
-				peerInfo, err := peer.AddrInfoFromP2pAddr(maddr)
-				if err != nil {
-					continue
-				}
-
-				if h.Network().Connectedness(peerInfo.ID) != network.Connected {
-					if err := h.Connect(ctx, *peerInfo); err != nil {
-						log.Printf("Failed to maintain bootstrap connection to %s: %v", peerInfo.ID.String()[:16], err)
-					} else {
-						fmt.Printf("\n[BOOTSTRAP] Reconnected to %s to maintain NAT mapping\n\n", peerInfo.ID.String()[:16])
-					}
-				}
-			}
-		}
-	}
 }
