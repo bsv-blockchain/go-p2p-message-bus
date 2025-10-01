@@ -2,6 +2,7 @@ package p2p
 
 import (
 	"log"
+	"time"
 
 	"github.com/libp2p/go-libp2p/core/crypto"
 )
@@ -53,4 +54,10 @@ type Config struct {
 	// Example: []string{"/ip4/203.0.113.1/tcp/4001"}
 	// If not provided, libp2p will automatically detect and announce local addresses.
 	AnnounceAddrs []string
+
+	// PeerCacheTTL is the duration after which unseen peers are removed from the cache.
+	// Peers not seen for longer than this duration will be evicted on next cache load.
+	// If not provided or zero, defaults to 24 hours (same as go-ethereum).
+	// Set to a negative value to disable TTL-based eviction.
+	PeerCacheTTL time.Duration
 }

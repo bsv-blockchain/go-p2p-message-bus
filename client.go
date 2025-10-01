@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -132,7 +134,12 @@ func NewClient(config Config) (P2PClient, error) {
 
 	// Load and connect to cached peers
 	if config.PeerCacheFile != "" {
-		cachedPeers := loadPeerCache(config.PeerCacheFile, logger)
+		// Default TTL is 24 hours (same as go-ethereum)
+		ttl := config.PeerCacheTTL
+		if ttl == 0 {
+			ttl = 24 * time.Hour
+		}
+		cachedPeers := loadPeerCache(config.PeerCacheFile, ttl, logger)
 		if len(cachedPeers) > 0 {
 			logger.Infof("Connecting to %d cached peers...", len(cachedPeers))
 
@@ -227,27 +234,21 @@ func (c *Client) Subscribe(topic string) <-chan Message {
 					time.Sleep(500 * time.Millisecond)
 					peerID := conn.RemotePeer()
 					topicPeers := t.ListPeers()
-					for _, tp := range topicPeers {
-						if tp == peerID {
-							name := c.peerTracker.getName(peerID)
-							addr := conn.RemoteMultiaddr().String()
-							c.logger.Infof("[CONNECTED] Topic peer %s [%s] %s", peerID.String(), name, addr)
+					if slices.Contains(topicPeers, peerID) {
+						name := c.peerTracker.getName(peerID)
+						addr := conn.RemoteMultiaddr().String()
+						c.logger.Infof("[CONNECTED] Topic peer %s [%s] %s", peerID.String(), name, addr)
 
-							// Save peer cache
-							c.savePeerCache()
-							return
-						}
+						// Save peer cache
+						c.savePeerCache()
 					}
 				}()
 			},
 			DisconnectedF: func(n network.Network, conn network.Conn) {
 				peerID := conn.RemotePeer()
 				topicPeers := t.ListPeers()
-				for _, tp := range topicPeers {
-					if tp == peerID {
-						c.logger.Infof("[DISCONNECTED] Lost connection to topic peer %s", peerID.String()[:16])
-						return
-					}
+				if slices.Contains(topicPeers, peerID) {
+					c.logger.Infof("[DISCONNECTED] Lost connection to topic peer %s", peerID.String()[:16])
 				}
 			},
 		})
@@ -440,7 +441,18 @@ func (c *Client) findAndConnectPeers(ctx context.Context, routingDiscovery *drou
 				if peer.ID == c.host.ID() {
 					continue
 				}
-				c.host.Connect(ctx, peer)
+				// Skip peers with no addresses
+				if len(peer.Addrs) == 0 {
+					continue
+				}
+				if err := c.host.Connect(ctx, peer); err != nil {
+					// Only log non-routine failures (skip common P2P discovery errors)
+					errStr := err.Error()
+					if !strings.Contains(errStr, "connection refused") &&
+						!strings.Contains(errStr, "rate limit exceeded") {
+						c.logger.Debugf("Failed to connect to discovered peer %s: %v", peer.ID.String(), err)
+					}
+				}
 			}
 		}(ctx)
 	}
@@ -508,7 +520,16 @@ func (c *Client) savePeerCache() {
 	}
 	c.mu.RUnlock()
 
+	// Load existing cache to preserve LastSeen for peers not currently connected
+	// Use negative TTL to disable eviction when loading for merge
+	existingPeers := loadPeerCache(c.config.PeerCacheFile, -1, c.logger)
+	existingMap := make(map[string]time.Time)
+	for _, ep := range existingPeers {
+		existingMap[ep.ID] = ep.LastSeen
+	}
+
 	var cachedPeers []cachedPeer
+	now := time.Now()
 
 	for p := range peerSet {
 		if conns := c.host.Network().ConnsToPeer(p); len(conns) > 0 {
@@ -517,9 +538,10 @@ func (c *Client) savePeerCache() {
 				addrs = append(addrs, conn.RemoteMultiaddr().String())
 			}
 			cachedPeers = append(cachedPeers, cachedPeer{
-				ID:    p.String(),
-				Name:  c.peerTracker.getName(p),
-				Addrs: addrs,
+				ID:       p.String(),
+				Name:     c.peerTracker.getName(p),
+				Addrs:    addrs,
+				LastSeen: now,
 			})
 		}
 	}
@@ -547,7 +569,7 @@ func (n *discoveryNotifee) HandlePeerFound(pi peer.AddrInfo) {
 	}
 }
 
-func loadPeerCache(cacheFile string, logger logger) []cachedPeer {
+func loadPeerCache(cacheFile string, ttl time.Duration, logger logger) []cachedPeer {
 	file, err := os.Open(cacheFile)
 	if err != nil {
 		if !os.IsNotExist(err) {
@@ -569,7 +591,34 @@ func loadPeerCache(cacheFile string, logger logger) []cachedPeer {
 		return nil
 	}
 
-	return peers
+	// Skip eviction if TTL is negative
+	if ttl < 0 {
+		return peers
+	}
+
+	// Evict stale peers based on TTL
+	now := time.Now()
+	threshold := now.Add(-ttl)
+	validPeers := make([]cachedPeer, 0, len(peers))
+	evicted := 0
+
+	for _, p := range peers {
+		if p.LastSeen.IsZero() {
+			// Peers from old cache format without LastSeen - keep them but warn
+			logger.Debugf("Peer %s has no LastSeen timestamp, keeping for now", p.ID[:16])
+			validPeers = append(validPeers, p)
+		} else if p.LastSeen.After(threshold) {
+			validPeers = append(validPeers, p)
+		} else {
+			evicted++
+		}
+	}
+
+	if evicted > 0 {
+		logger.Infof("Evicted %d stale peers (not seen for > %v)", evicted, ttl)
+	}
+
+	return validPeers
 }
 
 func savePeerCache(peers []cachedPeer, cacheFile string, logger logger) {
