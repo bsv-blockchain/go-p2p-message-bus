@@ -1,12 +1,10 @@
-module github.com/ordishs/p2p_poc
+module github.com/ordishs/p2p_poc/example
 
 go 1.25.1
 
 require (
-	github.com/libp2p/go-libp2p v0.43.0
-	github.com/libp2p/go-libp2p-kad-dht v0.34.0
-	github.com/libp2p/go-libp2p-pubsub v0.15.0
-	github.com/multiformats/go-multiaddr v0.16.1
+	github.com/ordishs/gocore v1.0.81
+	github.com/ordishs/p2p_poc v0.0.0
 )
 
 require (
@@ -41,8 +39,11 @@ require (
 	github.com/libp2p/go-buffer-pool v0.1.0 // indirect
 	github.com/libp2p/go-cidranger v1.1.0 // indirect
 	github.com/libp2p/go-flow-metrics v0.3.0 // indirect
+	github.com/libp2p/go-libp2p v0.43.0 // indirect
 	github.com/libp2p/go-libp2p-asn-util v0.4.1 // indirect
+	github.com/libp2p/go-libp2p-kad-dht v0.34.0 // indirect
 	github.com/libp2p/go-libp2p-kbucket v0.7.0 // indirect
+	github.com/libp2p/go-libp2p-pubsub v0.15.0 // indirect
 	github.com/libp2p/go-libp2p-record v0.3.1 // indirect
 	github.com/libp2p/go-libp2p-routing-helpers v0.7.5 // indirect
 	github.com/libp2p/go-msgio v0.3.0 // indirect
@@ -61,6 +62,7 @@ require (
 	github.com/mr-tron/base58 v1.2.0 // indirect
 	github.com/multiformats/go-base32 v0.1.0 // indirect
 	github.com/multiformats/go-base36 v0.2.0 // indirect
+	github.com/multiformats/go-multiaddr v0.16.1 // indirect
 	github.com/multiformats/go-multiaddr-dns v0.4.1 // indirect
 	github.com/multiformats/go-multiaddr-fmt v0.1.0 // indirect
 	github.com/multiformats/go-multibase v0.2.0 // indirect
@@ -69,7 +71,6 @@ require (
 	github.com/multiformats/go-multistream v0.6.1 // indirect
 	github.com/multiformats/go-varint v0.0.7 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
-	github.com/ordishs/gocore v1.0.81 // indirect
 	github.com/pbnjay/memory v0.0.0-20210728143218-7b4eea64cf58 // indirect
 	github.com/pion/datachannel v1.5.10 // indirect
 	github.com/pion/dtls/v2 v2.2.12 // indirect
@@ -123,3 +124,5 @@ require (
 	google.golang.org/protobuf v1.36.7 // indirect
 	lukechampine.com/blake3 v1.4.1 // indirect
 )
+
+replace github.com/ordishs/p2p_poc => ../
