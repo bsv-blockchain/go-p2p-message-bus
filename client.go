@@ -166,7 +166,7 @@ func NewClient(config Config) (P2PClient, error) {
 		libp2p.EnableNATService(),
 		libp2p.EnableHolePunching(),
 		libp2p.EnableRelay(),
-		libp2p.EnableAutoNATv2(),
+		libp2p.EnableAutoRelayWithStaticRelays([]peer.AddrInfo{}), // Enable auto relay discovery via DHT
 		libp2p.AddrsFactory(addressFactory),
 		libp2p.ConnectionGater(ipFilter),
 	)
