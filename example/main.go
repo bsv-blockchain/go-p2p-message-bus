@@ -161,13 +161,15 @@ func main() {
 			case <-ticker.C:
 				peers := client.GetPeers()
 				if len(peers) > 0 {
-					logger.Infof("\n=== Connected Peers: %d ===\n", len(peers))
+					sb := strings.Builder{}
+					sb.WriteString(fmt.Sprintf("\n=== Connected Peers: %d ===\n", len(peers)))
 					for _, peer := range peers {
-						logger.Infof("  - %s [%s]\n", peer.Name, peer.ID)
+						sb.WriteString(fmt.Sprintf("  - %s [%s]\n", peer.Name, peer.ID))
 						for _, addr := range peer.Addrs {
-							logger.Infof("    %s\n", addr)
+							sb.WriteString(fmt.Sprintf("    %s\n", addr))
 						}
 					}
+					logger.Infof("%s", sb.String())
 				}
 			}
 		}

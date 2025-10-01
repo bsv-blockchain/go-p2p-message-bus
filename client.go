@@ -234,7 +234,7 @@ func (c *Client) Subscribe(topic string) <-chan Message {
 							c.logger.Infof("[CONNECTED] Topic peer %s [%s] %s", peerID.String(), name, addr)
 
 							// Save peer cache
-							c.savePeerCache(t)
+							c.savePeerCache()
 							return
 						}
 					}
@@ -479,16 +479,27 @@ func (c *Client) receiveMessages(sub *pubsub.Subscription, topic *pubsub.Topic, 
 	}
 }
 
-func (c *Client) savePeerCache(topic *pubsub.Topic) {
+func (c *Client) savePeerCache() {
 	// Skip if peer caching is disabled
 	if c.config.PeerCacheFile == "" {
 		return
 	}
 
-	topicPeers := topic.ListPeers()
+	// Collect unique peers from all topics
+	peerSet := make(map[peer.ID]struct{})
+
+	c.mu.RLock()
+	for _, topic := range c.topics {
+		topicPeers := topic.ListPeers()
+		for _, p := range topicPeers {
+			peerSet[p] = struct{}{}
+		}
+	}
+	c.mu.RUnlock()
+
 	var cachedPeers []cachedPeer
 
-	for _, p := range topicPeers {
+	for p := range peerSet {
 		if conns := c.host.Network().ConnsToPeer(p); len(conns) > 0 {
 			var addrs []string
 			for _, conn := range conns {
@@ -592,11 +603,13 @@ func connectToCachedPeers(ctx context.Context, h host.Host, cachedPeers []cached
 			Addrs: maddrs,
 		}
 
-		go func(ai peer.AddrInfo) {
+		go func(ai peer.AddrInfo, name string) {
 			if err := h.Connect(ctx, ai); err == nil {
-				logger.Infof("Reconnected to cached peer: %s", ai.ID.String())
+				logger.Infof("Reconnected to cached peer: %s [%s]", name, ai.ID.String())
+			} else {
+				logger.Warnf("Failed to reconnect to cached peer %s [%s]: %v", name, ai.ID.String(), err)
 			}
-		}(addrInfo)
+		}(addrInfo, cp.Name)
 	}
 }
 
