@@ -742,9 +742,13 @@ func isPrivateIP(config Config, addr multiaddr.Multiaddr) bool {
 	return false
 }
 
-// Function to extract IP information from a Multiaddr
+// Function to extract IP information from a Multiaddr (supports IPv4 and IPv6)
 func extractIPFromMultiaddr(addr multiaddr.Multiaddr) (string, error) {
-	return addr.ValueForProtocol(multiaddr.P_IP4)
+	ip, err := addr.ValueForProtocol(multiaddr.P_IP4)
+	if err == nil && ip != "" {
+		return ip, nil
+	}
+	return addr.ValueForProtocol(multiaddr.P_IP6)
 }
 
 // GetPublicIP fetches the public IP address from ifconfig.me
