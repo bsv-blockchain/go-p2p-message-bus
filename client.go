@@ -116,7 +116,10 @@ func NewClient(config Config) (P2PClient, error) {
 			}
 			if len(ifconfig) > 0 {
 				logger.Infof("Public IP address: %v", ifconfig)
-				addr, _ := multiaddr.NewMultiaddr(fmt.Sprintf("/ip4/%s/tcp/%s", ifconfig, config.Port))
+				addr, err := multiaddr.NewMultiaddr(fmt.Sprintf("/ip4/%s/tcp/%s", ifconfig, config.Port))
+				if err != nil {
+					logger.Infof("Failed to create multiaddr from public IP: %v", err)
+				}
 				if addr != nil {
 					publicAddrs = append(publicAddrs, addr)
 				}
