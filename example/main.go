@@ -63,11 +63,12 @@ func main() {
 
 	// Create P2P client
 	client, err := p2p.NewClient(p2p.Config{
-		Name:          *name,
-		Logger:        logger,
-		PrivateKey:    privKey,
-		Port:          *port,
-		PeerCacheFile: "peer_cache.json", // Enable peer persistence
+		Name:            *name,
+		Logger:          logger,
+		PrivateKey:      privKey,
+		Port:            *port,
+		AllowPrivateIPs: false,
+		PeerCacheFile:   "peer_cache.json", // Enable peer persistence
 	})
 	if err != nil {
 		logger.Fatalf("Failed to create P2P client: %v", err)
