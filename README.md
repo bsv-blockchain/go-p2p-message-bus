@@ -82,6 +82,7 @@ type Config struct {
     Logger         Logger         // Optional: custom logger (uses DefaultLogger if not provided)
     PrivateKey     crypto.PrivKey // Required: private key for persistent peer ID
     PeerCacheFile  string         // Optional: file path for peer persistence
+    AnnounceAddrs  []string       // Optional: addresses to advertise to peers (for K8s)
 }
 ```
 
@@ -142,6 +143,31 @@ When enabled:
 - On restart, the client will reconnect to previously known peers
 - This significantly speeds up network reconnection
 - If not provided, peer caching is disabled
+
+**Kubernetes Support:**
+
+The `AnnounceAddrs` field allows you to specify the external addresses that your peer should advertise. This is essential in Kubernetes where the pod's internal IP differs from the externally accessible address:
+
+```go
+// Get external address from environment or K8s service
+externalIP := os.Getenv("EXTERNAL_IP")      // e.g., "203.0.113.1"
+externalPort := os.Getenv("EXTERNAL_PORT")  // e.g., "30001"
+
+client, err := p2p.NewPeer(p2p.Config{
+    Name:       "node1",
+    PrivateKey: privKey,
+    AnnounceAddrs: []string{
+        fmt.Sprintf("/ip4/%s/tcp/%s", externalIP, externalPort),
+    },
+})
+```
+
+Common Kubernetes scenarios:
+- **LoadBalancer Service**: Use the external IP of the LoadBalancer
+- **NodePort Service**: Use the node's external IP and the NodePort
+- **Ingress with TCP**: Use the ingress external IP and configured port
+
+Without `AnnounceAddrs`, libp2p will announce the pod's internal IP, which won't be reachable from outside the cluster.
 
 ### Client
 

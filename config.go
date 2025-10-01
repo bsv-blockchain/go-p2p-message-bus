@@ -46,4 +46,11 @@ type Config struct {
 	// If provided, the client will save connected peers to this file and reload them
 	// on restart for faster reconnection. If not provided, peer caching is disabled.
 	PeerCacheFile string
+
+	// AnnounceAddrs is an optional list of multiaddr strings that this peer should
+	// advertise to other peers. This is useful in Kubernetes or other environments
+	// where the local address differs from the externally reachable address.
+	// Example: []string{"/ip4/203.0.113.1/tcp/4001"}
+	// If not provided, libp2p will automatically detect and announce local addresses.
+	AnnounceAddrs []string
 }

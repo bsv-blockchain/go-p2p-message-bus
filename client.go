@@ -64,6 +64,24 @@ func NewClient(config Config) (*Client, error) {
 	var hostOpts []libp2p.Option
 	hostOpts = append(hostOpts, libp2p.Identity(config.PrivateKey))
 
+	// Configure announce addresses if provided (useful for K8s)
+	if len(config.AnnounceAddrs) > 0 {
+		var announceAddrs []multiaddr.Multiaddr
+		for _, addrStr := range config.AnnounceAddrs {
+			maddr, err := multiaddr.NewMultiaddr(addrStr)
+			if err != nil {
+				cancel()
+				return nil, fmt.Errorf("invalid announce address %s: %w", addrStr, err)
+			}
+			announceAddrs = append(announceAddrs, maddr)
+		}
+
+		hostOpts = append(hostOpts, libp2p.AddrsFactory(func([]multiaddr.Multiaddr) []multiaddr.Multiaddr {
+			return announceAddrs
+		}))
+		logger.Infof("Using custom announce addresses: %v", config.AnnounceAddrs)
+	}
+
 	// Create libp2p host
 	hostOpts = append(hostOpts,
 		libp2p.ListenAddrStrings(
