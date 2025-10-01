@@ -110,8 +110,12 @@ func NewClient(config Config) (P2PClient, error) {
 		if len(publicAddrs) == 0 {
 			// If no public addresses are set, let's attempt to grab it publicly
 			// Ignore errors because we don't care if we can't find it
-			ifconfig, _ := GetPublicIP(context.Background())
+			ifconfig, err := GetPublicIP(context.Background())
+			if err != nil {
+				logger.Infof("Failed to get public IP address: %v", err)
+			}
 			if len(ifconfig) > 0 {
+				logger.Infof("Public IP address: %v", ifconfig)
 				addr, _ := multiaddr.NewMultiaddr(fmt.Sprintf("/ip4/%s/tcp/%s", ifconfig, config.Port))
 				if addr != nil {
 					publicAddrs = append(publicAddrs, addr)
