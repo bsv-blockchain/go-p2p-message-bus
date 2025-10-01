@@ -1,11 +1,31 @@
 package p2p
 
 import (
+	"context"
 	"sync"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
 )
+
+// P2PClient defines the interface for a P2P messaging client.
+type P2PClient interface {
+	// Subscribe subscribes to a topic and returns a channel that will receive messages.
+	// The returned channel will be closed when the client is closed.
+	Subscribe(topic string) <-chan Message
+
+	// Publish publishes a message to the specified topic.
+	Publish(ctx context.Context, topic string, data []byte) error
+
+	// GetPeers returns information about all known peers on subscribed topics.
+	GetPeers() []PeerInfo
+
+	// GetID returns this peer's ID as a string.
+	GetID() string
+
+	// Close shuts down the client and releases all resources.
+	Close() error
+}
 
 // Message represents a received message from a peer.
 type Message struct {

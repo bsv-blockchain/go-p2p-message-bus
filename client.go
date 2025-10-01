@@ -24,6 +24,9 @@ import (
 	"github.com/multiformats/go-multiaddr"
 )
 
+// Compile-time check to ensure Client implements P2PClient interface
+var _ P2PClient = (*Client)(nil)
+
 // Client represents a P2P messaging client.
 type Client struct {
 	config      Config
@@ -43,7 +46,7 @@ type Client struct {
 
 // NewClient creates and initializes a new P2P client.
 // It automatically starts the client and begins peer discovery.
-func NewClient(config Config) (*Client, error) {
+func NewClient(config Config) (P2PClient, error) {
 	if config.Name == "" {
 		return nil, fmt.Errorf("config.Name is required")
 	}
