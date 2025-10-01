@@ -22,8 +22,8 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/pnet"
 	"github.com/libp2p/go-libp2p/p2p/discovery/mdns"
-	"github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/proto"
 	drouting "github.com/libp2p/go-libp2p/p2p/discovery/routing"
+	"github.com/libp2p/go-libp2p/p2p/protocol/circuitv2/proto"
 	"github.com/multiformats/go-multiaddr"
 )
 
@@ -35,10 +35,10 @@ type Message struct {
 }
 
 type PeerTracker struct {
-	mu          sync.RWMutex
-	names       map[peer.ID]string
-	relayCount  int
-	isRelaying  map[string]bool
+	mu         sync.RWMutex
+	names      map[peer.ID]string
+	relayCount int
+	isRelaying map[string]bool
 }
 
 func NewPeerTracker() *PeerTracker {
@@ -176,9 +176,15 @@ func main() {
 
 	routingDiscovery := drouting.NewRoutingDiscovery(kadDHT)
 	go func() {
+		time.Sleep(5 * time.Second)
+
 		_, err := routingDiscovery.Advertise(ctx, topicName)
 		if err != nil && ctx.Err() == nil {
-			log.Printf("Failed to advertise: %v", err)
+			if strings.Contains(err.Error(), "failed to find any peer in table") {
+				log.Printf("DHT routing table empty - peer discovery via mDNS or bootstrap nodes")
+			} else {
+				log.Printf("Failed to advertise: %v", err)
+			}
 		} else if err == nil {
 			fmt.Println("Announcing presence on DHT")
 		}
