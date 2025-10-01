@@ -10,15 +10,16 @@ import (
 	"syscall"
 	"time"
 
+	p2p "github.com/bsv-blockchain/go-p2p-message-bus"
 	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/ordishs/gocore"
-	p2p "github.com/bsv-blockchain/go-p2p-message-bus"
 )
 
 func main() {
 	name := flag.String("name", "", "Your node name")
 	privateKey := flag.String("key", "", "Private key hex (will generate if not provided)")
 	topics := flag.String("topics", "broadcast_p2p_poc", "Comma-separated list of topics to subscribe to")
+	port := flag.Int("port", 0, "port to listen on (0 for random)")
 	noBroadcast := flag.Bool("no-broadcast", false, "Disable message broadcasting")
 
 	flag.Parse()
@@ -62,10 +63,12 @@ func main() {
 
 	// Create P2P client
 	client, err := p2p.NewClient(p2p.Config{
-		Name:          *name,
-		Logger:        logger,
-		PrivateKey:    privKey,
-		PeerCacheFile: "peer_cache.json", // Enable peer persistence
+		Name:            *name,
+		Logger:          logger,
+		PrivateKey:      privKey,
+		Port:            *port,
+		AllowPrivateIPs: false,
+		PeerCacheFile:   "peer_cache.json", // Enable peer persistence
 	})
 	if err != nil {
 		logger.Fatalf("Failed to create P2P client: %v", err)

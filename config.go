@@ -53,4 +53,10 @@ type Config struct {
 	// Example: []string{"/ip4/203.0.113.1/tcp/4001"}
 	// If not provided, libp2p will automatically detect and announce local addresses.
 	AnnounceAddrs []string
+
+	// AllowPrivateIPs indicates whether to allow connections to peers with private IP addresses.
+	AllowPrivateIPs bool
+
+	// Port is the network port to listen on for incoming connections. If zero, a random port will be chosen.
+	Port int
 }

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"os"
 	"sync"
 	"time"
@@ -70,8 +71,8 @@ func NewClient(config Config) (P2PClient, error) {
 	hostOpts = append(hostOpts, libp2p.Identity(config.PrivateKey))
 
 	// Configure announce addresses if provided (useful for K8s)
+	var announceAddrs []multiaddr.Multiaddr
 	if len(config.AnnounceAddrs) > 0 {
-		var announceAddrs []multiaddr.Multiaddr
 		for _, addrStr := range config.AnnounceAddrs {
 			maddr, err := multiaddr.NewMultiaddr(addrStr)
 			if err != nil {
@@ -87,16 +88,36 @@ func NewClient(config Config) (P2PClient, error) {
 		logger.Infof("Using custom announce addresses: %v", config.AnnounceAddrs)
 	}
 
-	// Create libp2p host
+	// Simple address factory to only use custom announce addresses if provided
+	// Otherwise let libp2p/AutoNAT handle address detection automatically
+	var addressFactory func([]multiaddr.Multiaddr) []multiaddr.Multiaddr
+	if len(announceAddrs) > 0 {
+		addressFactory = func([]multiaddr.Multiaddr) []multiaddr.Multiaddr {
+			return announceAddrs
+		}
+		logger.Infof("Using only custom announce addresses for advertising")
+	}
+
+	// Get bootstrap peers from DHT library - these can act as relays
+	bootstrapPeers := dht.GetDefaultBootstrapPeerAddrInfos()
+
+	// Create libp2p host with NAT traversal options
 	hostOpts = append(hostOpts,
 		libp2p.ListenAddrStrings(
-			"/ip4/0.0.0.0/tcp/0",
-			"/ip6/::/tcp/0",
+			fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", config.Port), // Listen on all interfaces
+			fmt.Sprintf("/ip6/::/tcp/%d", config.Port),
 		),
-		libp2p.EnableNATService(),
-		libp2p.EnableHolePunching(),
-		libp2p.EnableRelay(),
+		libp2p.NATPortMap(),                                      // Try UPnP/NAT-PMP for automatic port forwarding
+		libp2p.EnableNATService(),                                // AutoNAT to detect if we're reachable
+		libp2p.EnableHolePunching(),                              // DCUtR protocol for NAT hole punching
+		libp2p.EnableRelay(),                                     // Act as relay for others
+		libp2p.EnableAutoRelayWithStaticRelays(bootstrapPeers),   // Use bootstrap nodes as potential relays
 	)
+
+	// Only apply address factory if custom announce addresses are provided
+	if addressFactory != nil {
+		hostOpts = append(hostOpts, libp2p.AddrsFactory(addressFactory))
+	}
 
 	h, err := libp2p.New(hostOpts...)
 	if err != nil {
@@ -108,7 +129,6 @@ func NewClient(config Config) (P2PClient, error) {
 	logger.Infof("Listening on: %v", h.Addrs())
 
 	// Set up DHT with bootstrap peers
-	bootstrapPeers := dht.GetDefaultBootstrapPeerAddrInfos()
 	kadDHT, err := dht.New(ctx, h, dht.Mode(dht.ModeServer), dht.BootstrapPeers(bootstrapPeers...))
 	if err != nil {
 		h.Close()
@@ -634,3 +654,51 @@ func PrivateKeyFromHex(keyHex string) (crypto.PrivKey, error) {
 
 	return priv, nil
 }
+
+// Function to check if an IP address is private
+func isPrivateIP(addr multiaddr.Multiaddr) bool {
+	ipStr, err := extractIPFromMultiaddr(addr)
+	if err != nil {
+		return false
+	}
+	// Check for IPv6 loopback
+	if ipStr == "::1" {
+		return true
+	}
+
+	ip := net.ParseIP(ipStr)
+	if ip == nil || ip.To4() == nil {
+		return false
+	}
+
+	// Define private IPv4 and IPv6 ranges
+	privateRanges := []*net.IPNet{
+		// IPv4
+		{IP: net.ParseIP("10.0.0.0"), Mask: net.CIDRMask(8, 32)},
+		{IP: net.ParseIP("172.16.0.0"), Mask: net.CIDRMask(12, 32)},
+		{IP: net.ParseIP("192.168.0.0"), Mask: net.CIDRMask(16, 32)},
+		{IP: net.ParseIP("127.0.0.0"), Mask: net.CIDRMask(8, 32)},
+		// IPv6
+		{IP: net.ParseIP("fc00::"), Mask: net.CIDRMask(7, 128)},  // Unique local address
+		{IP: net.ParseIP("fe80::"), Mask: net.CIDRMask(10, 128)}, // Link-local unicast
+	}
+
+	// Check if the IP falls into any of the private ranges or is loopback (::1)
+	for _, r := range privateRanges {
+		if r.Contains(ip) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// Function to extract IP information from a Multiaddr (supports IPv4 and IPv6)
+func extractIPFromMultiaddr(addr multiaddr.Multiaddr) (string, error) {
+	ip, err := addr.ValueForProtocol(multiaddr.P_IP4)
+	if err == nil && ip != "" {
+		return ip, nil
+	}
+	return addr.ValueForProtocol(multiaddr.P_IP6)
+}
+
