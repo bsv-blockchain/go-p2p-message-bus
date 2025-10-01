@@ -9,7 +9,6 @@ import (
 	"io"
 	"log"
 	"net"
-	"net/http"
 	"os"
 	"sync"
 	"time"
@@ -23,7 +22,6 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/p2p/discovery/mdns"
 	drouting "github.com/libp2p/go-libp2p/p2p/discovery/routing"
-	"github.com/libp2p/go-libp2p/p2p/net/conngater"
 	"github.com/multiformats/go-multiaddr"
 )
 
@@ -90,87 +88,36 @@ func NewClient(config Config) (P2PClient, error) {
 		logger.Infof("Using custom announce addresses: %v", config.AnnounceAddrs)
 	}
 
-	// define address factory to remove all private IPs from being broadcasted
-	addressFactory := func(addrs []multiaddr.Multiaddr) []multiaddr.Multiaddr {
-		var publicAddrs []multiaddr.Multiaddr
-		for _, addr := range addrs {
-			// if IP is not private, add it to the list
-			if !isPrivateIP(addr) || config.AllowPrivateIPs {
-				publicAddrs = append(publicAddrs, addr)
-			}
+	// Simple address factory to only use custom announce addresses if provided
+	// Otherwise let libp2p/AutoNAT handle address detection automatically
+	var addressFactory func([]multiaddr.Multiaddr) []multiaddr.Multiaddr
+	if len(announceAddrs) > 0 {
+		addressFactory = func([]multiaddr.Multiaddr) []multiaddr.Multiaddr {
+			return announceAddrs
 		}
-		// If a user specified a broadcast IP append it here
-		if len(announceAddrs) > 0 {
-			// here we're appending the external facing multiaddr we created above to the addressFactory so it will be broadcast out when I connect to a bootstrap node.
-			publicAddrs = append(publicAddrs, announceAddrs...)
-		}
-
-		// If we still don't have any advertisable addresses then attempt to grab it from `https://ifconfig.me/ip`
-		if len(publicAddrs) == 0 {
-			// If no public addresses are set, let's attempt to grab it publicly
-			// Ignore errors because we don't care if we can't find it
-			ifconfig, err := GetPublicIP(context.Background())
-			if err != nil {
-				logger.Infof("Failed to get public IP address: %v", err)
-			}
-			if len(ifconfig) > 0 {
-				addr, err := multiaddr.NewMultiaddr(fmt.Sprintf("/ip4/%s/tcp/%d", ifconfig, config.Port))
-				if err != nil {
-					logger.Infof("Failed to create multiaddr from public IP: %v", err)
-				}
-				if addr != nil {
-					publicAddrs = append(publicAddrs, addr)
-				}
-			}
-		}
-
-		return publicAddrs
+		logger.Infof("Using only custom announce addresses for advertising")
 	}
 
-	// Create an IP filter to optionally block private network ranges from being dialed
-	ipFilter, err := conngater.NewBasicConnectionGater(nil)
-	if err != nil {
-		return nil, err
-	}
+	// Get bootstrap peers from DHT library - these can act as relays
+	bootstrapPeers := dht.GetDefaultBootstrapPeerAddrInfos()
 
-	// By default, filter private IPs
-	if !config.AllowPrivateIPs {
-		// Add private IP blocks to be filtered out
-		for _, cidr := range []string{
-			"10.0.0.0/8",     // Private network 10.0.0.0 to 10.255.255.255
-			"172.16.0.0/12",  // Private network 172.16.0.0 to 172.31.255.255
-			"192.168.0.0/16", // Private network 192.168.0.0 to 192.168.255.255
-			"127.0.0.0/16",   // Local network
-			"100.64.0.0/10",  // Shared Address Space
-			"169.254.0.0/16", // Link-local addresses
-		} {
-			var ipnet *net.IPNet
-			var err error
-			_, ipnet, err = net.ParseCIDR(cidr)
-			if err != nil {
-				return nil, err
-			}
-			err = ipFilter.BlockSubnet(ipnet)
-			if err != nil {
-				continue
-			}
-		}
-	}
-
-	// Create libp2p host
+	// Create libp2p host with NAT traversal options
 	hostOpts = append(hostOpts,
 		libp2p.ListenAddrStrings(
 			fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", config.Port), // Listen on all interfaces
 			fmt.Sprintf("/ip6/::/tcp/%d", config.Port),
 		),
-		libp2p.NATPortMap(),                                       // Try UPnP/NAT-PMP for automatic port forwarding
-		libp2p.EnableNATService(),                                 // AutoNAT to detect if we're reachable
-		libp2p.EnableHolePunching(),                               // DCUtR protocol for NAT hole punching
-		libp2p.EnableRelay(),                                      // Act as relay for others
-		libp2p.EnableAutoRelayWithStaticRelays([]peer.AddrInfo{}), // Use relays if we're unreachable
-		libp2p.AddrsFactory(addressFactory),
-		libp2p.ConnectionGater(ipFilter),
+		libp2p.NATPortMap(),                                      // Try UPnP/NAT-PMP for automatic port forwarding
+		libp2p.EnableNATService(),                                // AutoNAT to detect if we're reachable
+		libp2p.EnableHolePunching(),                              // DCUtR protocol for NAT hole punching
+		libp2p.EnableRelay(),                                     // Act as relay for others
+		libp2p.EnableAutoRelayWithStaticRelays(bootstrapPeers),   // Use bootstrap nodes as potential relays
 	)
+
+	// Only apply address factory if custom announce addresses are provided
+	if addressFactory != nil {
+		hostOpts = append(hostOpts, libp2p.AddrsFactory(addressFactory))
+	}
 
 	h, err := libp2p.New(hostOpts...)
 	if err != nil {
@@ -182,7 +129,6 @@ func NewClient(config Config) (P2PClient, error) {
 	logger.Infof("Listening on: %v", h.Addrs())
 
 	// Set up DHT with bootstrap peers
-	bootstrapPeers := dht.GetDefaultBootstrapPeerAddrInfos()
 	kadDHT, err := dht.New(ctx, h, dht.Mode(dht.ModeServer), dht.BootstrapPeers(bootstrapPeers...))
 	if err != nil {
 		h.Close()
@@ -756,32 +702,3 @@ func extractIPFromMultiaddr(addr multiaddr.Multiaddr) (string, error) {
 	return addr.ValueForProtocol(multiaddr.P_IP6)
 }
 
-// GetPublicIP fetches the public IP address from ifconfig.me
-func GetPublicIP(ctx context.Context) (string, error) {
-	transport := &http.Transport{
-		DialContext: func(ctx context.Context, _, addr string) (net.Conn, error) {
-			// Force the use of IPv4 by specifying 'tcp4' as the network
-			return (&net.Dialer{}).DialContext(ctx, "tcp4", addr)
-		},
-		TLSHandshakeTimeout: 10 * time.Second,
-	}
-	client := &http.Client{
-		Transport: transport,
-	}
-	req, err := http.NewRequestWithContext(ctx, "GET", "https://ifconfig.me/ip", nil)
-	if err != nil {
-		return "", err
-	}
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", err
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", err
-	}
-
-	return string(body), resp.Body.Close()
-}
