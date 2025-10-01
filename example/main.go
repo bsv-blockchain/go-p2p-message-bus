@@ -66,7 +66,7 @@ func main() {
 		Name:          *name,
 		Logger:        logger,
 		PrivateKey:    privKey,
-		Port:          port,
+		Port:          *port,
 		PeerCacheFile: "peer_cache.json", // Enable peer persistence
 	})
 	if err != nil {
