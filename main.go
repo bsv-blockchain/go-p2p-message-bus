@@ -30,8 +30,8 @@ import (
 )
 
 const (
-	topicName      = "broadcast_p2p_poc"
-	peerCacheFile  = "peer_cache.json"
+	topicName     = "broadcast_p2p_poc"
+	peerCacheFile = "peer_cache.json"
 )
 
 type Message struct {
@@ -215,8 +215,15 @@ func main() {
 			monitorConnectionUpgrade(conn)
 		},
 		DisconnectedF: func(n network.Network, conn network.Conn) {
-			fmt.Printf("\n[DISCONNECTED] Lost connection to %s\n", conn.RemotePeer().String()[:16])
-			fmt.Printf("  Will attempt reconnection via cached peers and discovery...\n\n")
+			peerID := conn.RemotePeer()
+			topicPeers := topic.ListPeers()
+			for _, tp := range topicPeers {
+				if tp == peerID {
+					fmt.Printf("\n[DISCONNECTED] Lost connection to topic peer %s\n", peerID.String()[:16])
+					fmt.Printf("  Will attempt reconnection via cached peers and discovery...\n\n")
+					return
+				}
+			}
 		},
 	})
 
@@ -231,6 +238,8 @@ func main() {
 	go printPeersPeriodically(ctx, h, topic, peerTracker)
 
 	go maintainPeerConnections(ctx, h, topic)
+
+	go maintainBootstrapConnections(ctx, h, bootstrapPeers)
 
 	fmt.Println("Press Ctrl+C to exit")
 
@@ -622,7 +631,6 @@ func maintainPeerConnections(ctx context.Context, h host.Host, topic *pubsub.Top
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			topicPeers := topic.ListPeers()
 			cachedPeers := loadPeerCache()
 
 			for _, cp := range cachedPeers {
@@ -631,24 +639,12 @@ func maintainPeerConnections(ctx context.Context, h host.Host, topic *pubsub.Top
 					continue
 				}
 
-				isTopicPeer := false
-				for _, tp := range topicPeers {
-					if tp == peerID {
-						isTopicPeer = true
-						break
-					}
-				}
-
-				if !isTopicPeer {
-					continue
-				}
-
 				connectedness := h.Network().Connectedness(peerID)
 				if connectedness == network.Connected {
 					continue
 				}
 
-				fmt.Printf("\n[RECONNECT] Attempting to reconnect to %s (%s)...\n", cp.Name, peerID.String()[:16])
+				fmt.Printf("\n[RECONNECT] Attempting to reconnect to topic peer %s (%s)...\n", cp.Name, peerID.String()[:16])
 
 				var maddrs []multiaddr.Multiaddr
 				for _, addrStr := range cp.Addrs {
@@ -669,6 +665,38 @@ func maintainPeerConnections(ctx context.Context, h host.Host, topic *pubsub.Top
 						fmt.Printf("  Reconnection attempt failed: %v\n\n", err)
 					} else {
 						fmt.Printf("  Reconnected successfully!\n\n")
+					}
+				}
+			}
+		}
+	}
+}
+
+func maintainBootstrapConnections(ctx context.Context, h host.Host, bootstrapPeers []string) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			for _, addr := range bootstrapPeers {
+				maddr, err := multiaddr.NewMultiaddr(addr)
+				if err != nil {
+					continue
+				}
+
+				peerInfo, err := peer.AddrInfoFromP2pAddr(maddr)
+				if err != nil {
+					continue
+				}
+
+				if h.Network().Connectedness(peerInfo.ID) != network.Connected {
+					if err := h.Connect(ctx, *peerInfo); err != nil {
+						log.Printf("Failed to maintain bootstrap connection to %s: %v", peerInfo.ID.String()[:16], err)
+					} else {
+						fmt.Printf("\n[BOOTSTRAP] Reconnected to %s to maintain NAT mapping\n\n", peerInfo.ID.String()[:16])
 					}
 				}
 			}
