@@ -1,3 +1,4 @@
 .history/
 p2p_poc
 peer_cache.json
+settings.local.json

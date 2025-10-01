@@ -174,7 +174,7 @@ func NewClient(config Config) (P2PClient, error) {
 	// Start DHT discovery
 	routingDiscovery := drouting.NewRoutingDiscovery(kadDHT)
 	go client.waitForDHTAndAdvertise(ctx, routingDiscovery)
-	go client.discoverPeers(ctx, routingDiscovery)
+	go client.discoverPeers(ctx, routingDiscovery, true)
 
 	return client, nil
 }
@@ -400,7 +400,14 @@ func (c *Client) waitForDHTAndAdvertise(ctx context.Context, routingDiscovery *d
 	}
 }
 
-func (c *Client) discoverPeers(ctx context.Context, routingDiscovery *drouting.RoutingDiscovery) {
+func (c *Client) discoverPeers(ctx context.Context, routingDiscovery *drouting.RoutingDiscovery, runImmediately bool) {
+	// Run discovery immediately on startup if requested
+	if runImmediately {
+		// Small delay to allow topics to be joined
+		time.Sleep(1 * time.Second)
+		c.findAndConnectPeers(ctx, routingDiscovery)
+	}
+
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 
@@ -409,29 +416,33 @@ func (c *Client) discoverPeers(ctx context.Context, routingDiscovery *drouting.R
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			c.mu.RLock()
-			topicsCopy := make([]string, 0, len(c.topics))
-			for topic := range c.topics {
-				topicsCopy = append(topicsCopy, topic)
-			}
-			c.mu.RUnlock()
+			c.findAndConnectPeers(ctx, routingDiscovery)
+		}
+	}
+}
 
-			for _, topic := range topicsCopy {
-				peerChan, err := routingDiscovery.FindPeers(ctx, topic)
-				if err != nil {
+func (c *Client) findAndConnectPeers(ctx context.Context, routingDiscovery *drouting.RoutingDiscovery) {
+	c.mu.RLock()
+	topicsCopy := make([]string, 0, len(c.topics))
+	for topic := range c.topics {
+		topicsCopy = append(topicsCopy, topic)
+	}
+	c.mu.RUnlock()
+
+	for _, topic := range topicsCopy {
+		peerChan, err := routingDiscovery.FindPeers(ctx, topic)
+		if err != nil {
+			continue
+		}
+
+		go func(ctx context.Context) {
+			for peer := range peerChan {
+				if peer.ID == c.host.ID() {
 					continue
 				}
-
-				go func(ctx context.Context) {
-					for peer := range peerChan {
-						if peer.ID == c.host.ID() {
-							continue
-						}
-						c.host.Connect(ctx, peer)
-					}
-				}(ctx)
+				c.host.Connect(ctx, peer)
 			}
-		}
+		}(ctx)
 	}
 }
 
