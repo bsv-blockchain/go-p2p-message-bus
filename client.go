@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/libp2p/go-libp2p"
@@ -32,6 +33,7 @@ type Client struct {
 	topics      map[string]*pubsub.Topic
 	subs        map[string]*pubsub.Subscription
 	msgChans    map[string]chan Message
+	mu          sync.RWMutex
 	peerTracker *peerTracker
 	ctx         context.Context
 	cancel      context.CancelFunc
@@ -179,11 +181,17 @@ func NewClient(config Config) (*Client, error) {
 // The returned channel will be closed when the client is closed.
 func (c *Client) Subscribe(topic string) <-chan Message {
 	msgChan := make(chan Message, 100)
+
+	c.mu.Lock()
 	c.msgChans[topic] = msgChan
+	c.mu.Unlock()
 
 	go func() {
 		// Join or get existing topic
+		c.mu.Lock()
 		t, ok := c.topics[topic]
+		c.mu.Unlock()
+
 		if !ok {
 			var err error
 			t, err = c.pubsub.Join(topic)
@@ -192,7 +200,10 @@ func (c *Client) Subscribe(topic string) <-chan Message {
 				close(msgChan)
 				return
 			}
+
+			c.mu.Lock()
 			c.topics[topic] = t
+			c.mu.Unlock()
 		}
 
 		// Subscribe to topic
@@ -202,7 +213,10 @@ func (c *Client) Subscribe(topic string) <-chan Message {
 			close(msgChan)
 			return
 		}
+
+		c.mu.Lock()
 		c.subs[topic] = sub
+		c.mu.Unlock()
 
 		// Set up peer connection notifications for this topic
 		c.host.Network().Notify(&network.NotifyBundle{
@@ -245,14 +259,20 @@ func (c *Client) Subscribe(topic string) <-chan Message {
 
 // Publish publishes a message to the specified topic.
 func (c *Client) Publish(ctx context.Context, topic string, data []byte) error {
+	c.mu.RLock()
 	t, ok := c.topics[topic]
+	c.mu.RUnlock()
+
 	if !ok {
 		var err error
 		t, err = c.pubsub.Join(topic)
 		if err != nil {
 			return fmt.Errorf("failed to join topic: %w", err)
 		}
+
+		c.mu.Lock()
 		c.topics[topic] = t
+		c.mu.Unlock()
 	}
 
 	// Wrap data with metadata
@@ -305,6 +325,7 @@ func (c *Client) Close() error {
 
 	done := make(chan struct{})
 	go func() {
+		c.mu.Lock()
 		// Close all message channels
 		for _, ch := range c.msgChans {
 			close(ch)
@@ -319,6 +340,7 @@ func (c *Client) Close() error {
 		for _, topic := range c.topics {
 			topic.Close()
 		}
+		c.mu.Unlock()
 
 		// Close services
 		if c.mdnsService != nil {
@@ -355,7 +377,14 @@ func (c *Client) waitForDHTAndAdvertise(ctx context.Context, routingDiscovery *d
 		case <-ticker.C:
 			if len(c.dht.RoutingTable().ListPeers()) > 0 {
 				// Advertise on DHT for all topics
+				c.mu.RLock()
+				topicsCopy := make([]string, 0, len(c.topics))
 				for topic := range c.topics {
+					topicsCopy = append(topicsCopy, topic)
+				}
+				c.mu.RUnlock()
+
+				for _, topic := range topicsCopy {
 					_, err := routingDiscovery.Advertise(ctx, topic)
 					if err != nil {
 						c.logger.Warnf("Failed to advertise topic %s: %v", topic, err)
@@ -378,7 +407,14 @@ func (c *Client) discoverPeers(ctx context.Context, routingDiscovery *drouting.R
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			c.mu.RLock()
+			topicsCopy := make([]string, 0, len(c.topics))
 			for topic := range c.topics {
+				topicsCopy = append(topicsCopy, topic)
+			}
+			c.mu.RUnlock()
+
+			for _, topic := range topicsCopy {
 				peerChan, err := routingDiscovery.FindPeers(ctx, topic)
 				if err != nil {
 					continue

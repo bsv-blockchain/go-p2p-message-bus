@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -14,11 +15,11 @@ import (
 	p2p "github.com/ordishs/p2p_poc"
 )
 
-const topicName = "broadcast_p2p_poc"
-
 func main() {
 	name := flag.String("name", "", "Your node name")
 	privateKey := flag.String("key", "", "Private key hex (will generate if not provided)")
+	topics := flag.String("topics", "broadcast_p2p_poc", "Comma-separated list of topics to subscribe to")
+	noBroadcast := flag.Bool("no-broadcast", false, "Disable message broadcasting")
 
 	flag.Parse()
 
@@ -71,37 +72,62 @@ func main() {
 	}
 	defer client.Close()
 
-	// Subscribe to topic
-	msgChan := client.Subscribe(topicName)
+	// Parse topics list
+	topicList := strings.Split(*topics, ",")
+	for i, t := range topicList {
+		topicList[i] = strings.TrimSpace(t)
+	}
+
+	logger.Infof("Subscribing to topics: %v", topicList)
+
+	// Subscribe to all topics and merge messages into single channel
+	allMsgChan := make(chan p2p.Message, 100)
+
+	for _, topic := range topicList {
+		msgChan := client.Subscribe(topic)
+		logger.Infof("Subscribed to topic: %s", topic)
+
+		go func(ch <-chan p2p.Message) {
+			for msg := range ch {
+				allMsgChan <- msg
+			}
+		}(msgChan)
+
+		logger.Infof("Subscribed to topic: %s", topic)
+	}
 
 	// Start message receiver
 	go func() {
-		for msg := range msgChan {
-			fmt.Printf("[%-20s] %s: %s\n", msg.FromID, msg.From, string(msg.Data))
+		for msg := range allMsgChan {
+			fmt.Printf("[%-52s] %s: %s (topic: %s)\n", msg.FromID, msg.From, string(msg.Data), msg.Topic)
 		}
 	}()
 
-	// Start message broadcaster
-	go func() {
-		counter := 0
-		ticker := time.NewTicker(1 * time.Second)
-		defer ticker.Stop()
+	// Start message broadcaster (publishes to all topics)
+	if !*noBroadcast {
+		go func() {
+			counter := 0
+			ticker := time.NewTicker(1 * time.Second)
+			defer ticker.Stop()
 
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				counter++
-				data := fmt.Sprintf("Message #%d", counter)
-
-				if err := client.Publish(topicName, []byte(data)); err != nil {
+			for {
+				select {
+				case <-ctx.Done():
 					return
+				case <-ticker.C:
+					counter++
+					data := fmt.Sprintf("Message #%d", counter)
+
+					for _, topic := range topicList {
+						if err := client.Publish(ctx, topic, []byte(data)); err != nil {
+							return
+						}
+					}
+					fmt.Printf("[%-52s] %s: %s\n", "local", *name, data)
 				}
-				fmt.Printf("[%-52s] %s: %s\n", "local", *name, data)
 			}
-		}
-	}()
+		}()
+	}
 
 	// Periodically display peer information
 	go func() {
@@ -117,7 +143,7 @@ func main() {
 				if len(peers) > 0 {
 					fmt.Printf("\n=== Connected Peers: %d ===\n", len(peers))
 					for _, peer := range peers {
-						fmt.Printf("  - %s [%s]\n", peer.Name, peer.ID[:16])
+						fmt.Printf("  - %s [%s]\n", peer.Name, peer.ID)
 						for _, addr := range peer.Addrs {
 							fmt.Printf("    %s\n", addr)
 						}
