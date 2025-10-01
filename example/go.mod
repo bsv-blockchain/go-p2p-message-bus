@@ -3,8 +3,9 @@ module github.com/ordishs/p2p_poc/example
 go 1.25.1
 
 require (
-	github.com/ordishs/gocore v1.0.81
 	github.com/bsv-blockchain/go-p2p-message-bus v0.0.0
+	github.com/libp2p/go-libp2p v0.43.0
+	github.com/ordishs/gocore v1.0.81
 )
 
 require (
@@ -39,7 +40,6 @@ require (
 	github.com/libp2p/go-buffer-pool v0.1.0 // indirect
 	github.com/libp2p/go-cidranger v1.1.0 // indirect
 	github.com/libp2p/go-flow-metrics v0.3.0 // indirect
-	github.com/libp2p/go-libp2p v0.43.0 // indirect
 	github.com/libp2p/go-libp2p-asn-util v0.4.1 // indirect
 	github.com/libp2p/go-libp2p-kad-dht v0.34.0 // indirect
 	github.com/libp2p/go-libp2p-kbucket v0.7.0 // indirect
