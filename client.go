@@ -95,8 +95,7 @@ func NewClient(config Config) (P2PClient, error) {
 		var publicAddrs []multiaddr.Multiaddr
 		for _, addr := range addrs {
 			// if IP is not private, add it to the list
-			logger.Infof("address is private? %v", isPrivateIP(config, addr))
-			if !isPrivateIP(config, addr) || config.AllowPrivateIPs {
+			if !isPrivateIP(addr) || config.AllowPrivateIPs {
 				publicAddrs = append(publicAddrs, addr)
 			}
 		}
@@ -115,7 +114,6 @@ func NewClient(config Config) (P2PClient, error) {
 				logger.Infof("Failed to get public IP address: %v", err)
 			}
 			if len(ifconfig) > 0 {
-				logger.Infof("Public IP address: %v", ifconfig)
 				addr, err := multiaddr.NewMultiaddr(fmt.Sprintf("/ip4/%s/tcp/%d", ifconfig, config.Port))
 				if err != nil {
 					logger.Infof("Failed to create multiaddr from public IP: %v", err)
@@ -125,9 +123,7 @@ func NewClient(config Config) (P2PClient, error) {
 				}
 			}
 		}
-		if len(publicAddrs) > 0 {
-			logger.Infof("Using advertising addresses: %v", publicAddrs[0])
-		}
+
 		return publicAddrs
 	}
 
@@ -170,6 +166,7 @@ func NewClient(config Config) (P2PClient, error) {
 		libp2p.EnableNATService(),
 		libp2p.EnableHolePunching(),
 		libp2p.EnableRelay(),
+		libp2p.EnableAutoNATv2(),
 		libp2p.AddrsFactory(addressFactory),
 		libp2p.ConnectionGater(ipFilter),
 	)
@@ -712,13 +709,11 @@ func PrivateKeyFromHex(keyHex string) (crypto.PrivKey, error) {
 }
 
 // Function to check if an IP address is private
-func isPrivateIP(config Config, addr multiaddr.Multiaddr) bool {
-	config.Logger.Infof("Multiaddr: %s", addr.String())
+func isPrivateIP(addr multiaddr.Multiaddr) bool {
 	ipStr, err := extractIPFromMultiaddr(addr)
 	if err != nil {
 		return false
 	}
-	config.Logger.Infof("Extracted IP: %s", ipStr)
 	// Check for IPv6 loopback
 	if ipStr == "::1" {
 		return true
@@ -728,8 +723,6 @@ func isPrivateIP(config Config, addr multiaddr.Multiaddr) bool {
 	if ip == nil || ip.To4() == nil {
 		return false
 	}
-
-	config.Logger.Infof("Parsed IP: %s", ip.String())
 
 	// Define private IPv4 and IPv6 ranges
 	privateRanges := []*net.IPNet{
@@ -746,7 +739,6 @@ func isPrivateIP(config Config, addr multiaddr.Multiaddr) bool {
 	// Check if the IP falls into any of the private ranges or is loopback (::1)
 	for _, r := range privateRanges {
 		if r.Contains(ip) {
-			config.Logger.Infof("Found private IP: %s", ip)
 			return true
 		}
 	}
