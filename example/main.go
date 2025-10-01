@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -10,9 +11,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/libp2p/go-libp2p/core/crypto"
-	"github.com/ordishs/gocore"
 	p2p "github.com/bsv-blockchain/go-p2p-message-bus"
+	"github.com/libp2p/go-libp2p/core/crypto"
 )
 
 func main() {
@@ -23,10 +23,11 @@ func main() {
 
 	flag.Parse()
 
-	logger := gocore.Log("p2p_poc")
+	logger := &p2p.DefaultLogger{}
 
 	if *name == "" {
-		logger.Fatal("--name flag is required")
+		logger.Errorf("--name flag is required")
+		return
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -46,17 +47,19 @@ func main() {
 		// Generate a new key
 		privKey, err = p2p.GeneratePrivateKey()
 		if err != nil {
-			logger.Fatalf("Failed to generate private key: %v", err)
+			logger.Errorf("Failed to generate private key: %v", err)
+			return
 		}
 
 		keyHex, _ = p2p.PrivateKeyToHex(privKey)
-		fmt.Printf("Generated new private key: %s\n", keyHex)
-		fmt.Println("Save this key and use it next time with --key flag or P2P_PRIVATE_KEY env var")
+		logger.Infof("Generated new private key: %s\n", keyHex)
+		logger.Infof("Save this key and use it next time with --key flag or P2P_PRIVATE_KEY env var")
 	} else {
 		// Load key from hex
 		privKey, err = p2p.PrivateKeyFromHex(keyHex)
 		if err != nil {
-			logger.Fatalf("Failed to load private key: %v", err)
+			logger.Errorf("Failed to load private key: %v", err)
+			return
 		}
 	}
 
@@ -68,8 +71,10 @@ func main() {
 		PeerCacheFile: "peer_cache.json", // Enable peer persistence
 	})
 	if err != nil {
-		logger.Fatalf("Failed to create P2P client: %v", err)
+		logger.Errorf("Failed to create P2P client: %v", err)
+		return
 	}
+
 	defer client.Close()
 
 	// Parse topics list
@@ -77,8 +82,6 @@ func main() {
 	for i, t := range topicList {
 		topicList[i] = strings.TrimSpace(t)
 	}
-
-	logger.Infof("Subscribing to topics: %v", topicList)
 
 	// Subscribe to all topics and merge messages into single channel
 	allMsgChan := make(chan p2p.Message, 100)
@@ -92,14 +95,26 @@ func main() {
 				allMsgChan <- msg
 			}
 		}(msgChan)
-
-		logger.Infof("Subscribed to topic: %s", topic)
 	}
 
 	// Start message receiver
 	go func() {
 		for msg := range allMsgChan {
-			fmt.Printf("[%-52s] %s: %s (topic: %s)\n", msg.FromID, msg.From, string(msg.Data), msg.Topic)
+			var data string
+
+			// Try to unmarshal and re-marshal for pretty printing
+			var jsonObj interface{}
+			if err := json.Unmarshal(msg.Data, &jsonObj); err == nil {
+				if jsonBytes, err := json.MarshalIndent(jsonObj, "", "  "); err == nil {
+					data = string(jsonBytes)
+				} else {
+					data = string(msg.Data)
+				}
+			} else {
+				data = string(msg.Data)
+			}
+
+			logger.Infof("[%-52s] %s: (%s)\n%s", msg.FromID, msg.From, msg.Topic, data)
 		}
 	}()
 
@@ -123,7 +138,7 @@ func main() {
 							return
 						}
 					}
-					fmt.Printf("[%-52s] %s: %s\n", "local", *name, data)
+					logger.Infof("[%-52s] %s: %s\n", "local", *name, data)
 				}
 			}
 		}()
@@ -141,26 +156,25 @@ func main() {
 			case <-ticker.C:
 				peers := client.GetPeers()
 				if len(peers) > 0 {
-					fmt.Printf("\n=== Connected Peers: %d ===\n", len(peers))
+					logger.Infof("\n=== Connected Peers: %d ===\n", len(peers))
 					for _, peer := range peers {
-						fmt.Printf("  - %s [%s]\n", peer.Name, peer.ID)
+						logger.Infof("  - %s [%s]\n", peer.Name, peer.ID)
 						for _, addr := range peer.Addrs {
-							fmt.Printf("    %s\n", addr)
+							logger.Infof("    %s\n", addr)
 						}
 					}
-					fmt.Println()
 				}
 			}
 		}
 	}()
 
-	fmt.Println("P2P client started. Press Ctrl+C to exit")
+	logger.Infof("P2P client started. Press Ctrl+C to exit")
 
 	// Wait for shutdown signal
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	<-sigChan
 
-	fmt.Println("\nShutting down...")
+	logger.Infof("\nShutting down...")
 	cancel()
 }

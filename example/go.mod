@@ -3,7 +3,6 @@ module github.com/ordishs/p2p_poc/example
 go 1.25.1
 
 require (
-	github.com/ordishs/gocore v1.0.81
 	github.com/bsv-blockchain/go-p2p-message-bus v0.0.0
 )
 

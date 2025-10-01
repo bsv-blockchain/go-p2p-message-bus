@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"sync"
 	"time"
@@ -126,7 +125,7 @@ func NewClient(config Config) (P2PClient, error) {
 	for _, peerInfo := range bootstrapPeers {
 		go func(pi peer.AddrInfo) {
 			if err := h.Connect(ctx, pi); err == nil {
-				log.Printf("Connected to bootstrap peer: %s", pi.ID.String())
+				logger.Infof("Connected to bootstrap peer: %s", pi.ID.String())
 			}
 		}(peerInfo)
 	}
@@ -150,11 +149,11 @@ func NewClient(config Config) (P2PClient, error) {
 	}
 
 	// Set up mDNS discovery
-	mdnsService := mdns.NewMdnsService(h, "", &discoveryNotifee{h: h, ctx: ctx})
+	mdnsService := mdns.NewMdnsService(h, "", &discoveryNotifee{h: h, ctx: ctx, logger: logger})
 	if err := mdnsService.Start(); err != nil {
-		log.Printf("Warning: mDNS failed to start: %v", err)
+		logger.Errorf("mDNS failed to start: %v", err)
 	} else {
-		log.Println("mDNS discovery started")
+		logger.Infof("mDNS discovery started")
 	}
 
 	client := &Client{
@@ -199,7 +198,7 @@ func (c *Client) Subscribe(topic string) <-chan Message {
 			var err error
 			t, err = c.pubsub.Join(topic)
 			if err != nil {
-				log.Printf("Failed to join topic %s: %v", topic, err)
+				c.logger.Errorf("Failed to join topic %s: %v", topic, err)
 				close(msgChan)
 				return
 			}
@@ -212,7 +211,7 @@ func (c *Client) Subscribe(topic string) <-chan Message {
 		// Subscribe to topic
 		sub, err := t.Subscribe()
 		if err != nil {
-			log.Printf("Failed to subscribe to topic %s: %v", topic, err)
+			c.logger.Errorf("Failed to subscribe to topic %s: %v", topic, err)
 			close(msgChan)
 			return
 		}
@@ -232,7 +231,7 @@ func (c *Client) Subscribe(topic string) <-chan Message {
 						if tp == peerID {
 							name := c.peerTracker.getName(peerID)
 							addr := conn.RemoteMultiaddr().String()
-							log.Printf("[CONNECTED] Topic peer %s [%s] %s", peerID.String(), name, addr)
+							c.logger.Infof("[CONNECTED] Topic peer %s [%s] %s", peerID.String(), name, addr)
 
 							// Save peer cache
 							c.savePeerCache(t)
@@ -246,7 +245,7 @@ func (c *Client) Subscribe(topic string) <-chan Message {
 				topicPeers := t.ListPeers()
 				for _, tp := range topicPeers {
 					if tp == peerID {
-						log.Printf("[DISCONNECTED] Lost connection to topic peer %s", peerID.String()[:16])
+						c.logger.Infof("[DISCONNECTED] Lost connection to topic peer %s", peerID.String()[:16])
 						return
 					}
 				}
@@ -358,7 +357,7 @@ func (c *Client) Close() error {
 	case <-done:
 		return nil
 	case <-time.After(2 * time.Second):
-		log.Printf("Warning: Clean shutdown timed out, forcing exit")
+		c.logger.Warnf("Clean shutdown timed out, forcing exit")
 		return nil
 	}
 }
@@ -443,7 +442,7 @@ func (c *Client) receiveMessages(sub *pubsub.Subscription, topic *pubsub.Topic, 
 			if c.ctx.Err() != nil {
 				return
 			}
-			log.Printf("Error reading message: %v", err)
+			c.logger.Errorf("Error reading message: %v", err)
 			continue
 		}
 
@@ -458,7 +457,7 @@ func (c *Client) receiveMessages(sub *pubsub.Subscription, topic *pubsub.Topic, 
 			Data []byte `json:"data"`
 		}
 		if err := json.Unmarshal(msg.Data, &m); err != nil {
-			log.Printf("Error unmarshaling message: %v", err)
+			c.logger.Errorf("Error unmarshaling message: %v", err)
 			continue
 		}
 
@@ -511,8 +510,9 @@ func (c *Client) savePeerCache(topic *pubsub.Topic) {
 // Helper functions
 
 type discoveryNotifee struct {
-	h   host.Host
-	ctx context.Context
+	h      host.Host
+	ctx    context.Context
+	logger logger
 }
 
 func (n *discoveryNotifee) HandlePeerFound(pi peer.AddrInfo) {
@@ -521,7 +521,7 @@ func (n *discoveryNotifee) HandlePeerFound(pi peer.AddrInfo) {
 	}
 
 	if err := n.h.Connect(n.ctx, pi); err == nil {
-		log.Printf("Connected to peer: %s", pi.ID.String())
+		n.logger.Infof("Connected to peer: %s", pi.ID.String())
 	}
 }
 
