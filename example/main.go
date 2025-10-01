@@ -98,7 +98,7 @@ func main() {
 				if err := client.Publish(topicName, []byte(data)); err != nil {
 					return
 				}
-				fmt.Printf("[%-20s] %s: %s\n", "local", *name, data)
+				fmt.Printf("[%-52s] %s: %s\n", "local", *name, data)
 			}
 		}
 	}()

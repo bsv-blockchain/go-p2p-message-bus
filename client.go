@@ -294,6 +294,11 @@ func (c *Client) GetPeers() []PeerInfo {
 	return peers
 }
 
+// GetID returns this peer's ID as a string.
+func (c *Client) GetID() string {
+	return c.host.ID().String()
+}
+
 // Close shuts down the client and releases all resources.
 func (c *Client) Close() error {
 	c.cancel()
@@ -589,12 +594,4 @@ func PrivateKeyFromHex(keyHex string) (crypto.PrivKey, error) {
 	}
 
 	return priv, nil
-}
-
-func keyToHex(priv crypto.PrivKey) string {
-	keyBytes, err := crypto.MarshalPrivateKey(priv)
-	if err != nil {
-		return ""
-	}
-	return hex.EncodeToString(keyBytes)
 }

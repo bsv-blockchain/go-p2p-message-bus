@@ -217,6 +217,14 @@ func (c *Client) GetPeers() []PeerInfo
 
 Returns information about all known peers on subscribed topics.
 
+#### GetID
+
+```go
+func (c *Client) GetID() string
+```
+
+Returns this peer's ID as a string.
+
 #### GetPrivateKeyHex
 
 ```go
