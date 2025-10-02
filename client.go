@@ -98,17 +98,22 @@ func NewClient(config Config) (P2PClient, error) {
 		for _, relayStr := range config.RelayPeers {
 			maddr, err := multiaddr.NewMultiaddr(relayStr)
 			if err != nil {
-				logger.Warnf("Invalid relay address %s: %v", relayStr, err)
+				logger.Errorf("Invalid relay address %s: %v (hint: use /dns4/ for hostnames, /ip4/ for IP addresses)", relayStr, err)
 				continue
 			}
 			addrInfo, err := peer.AddrInfoFromP2pAddr(maddr)
 			if err != nil {
-				logger.Warnf("Invalid relay peer info %s: %v", relayStr, err)
+				logger.Errorf("Invalid relay peer info %s: %v", relayStr, err)
 				continue
 			}
 			relayPeers = append(relayPeers, *addrInfo)
 		}
-		logger.Infof("Using %d custom relay peer(s)", len(relayPeers))
+		if len(relayPeers) > 0 {
+			logger.Infof("Using %d custom relay peer(s)", len(relayPeers))
+		} else {
+			logger.Warnf("No valid custom relay peers found, falling back to bootstrap peers as relays")
+			relayPeers = bootstrapPeers
+		}
 	} else {
 		// Fall back to bootstrap peers as relays
 		relayPeers = bootstrapPeers
@@ -158,6 +163,19 @@ func NewClient(config Config) (P2PClient, error) {
 				logger.Infof("Connected to bootstrap peer: %s", pi.ID.String())
 			}
 		}(peerInfo)
+	}
+
+	// If custom relay peers are defined, connect to them immediately as regular peers
+	if len(config.RelayPeers) > 0 {
+		for _, relayPeer := range relayPeers {
+			go func(pi peer.AddrInfo) {
+				if err := h.Connect(ctx, pi); err == nil {
+					logger.Infof("Connected to relay peer: %s", pi.ID.String())
+				} else {
+					logger.Warnf("Failed to connect to relay peer %s: %v", pi.ID.String(), err)
+				}
+			}(relayPeer)
+		}
 	}
 
 	// Load and connect to cached peers
