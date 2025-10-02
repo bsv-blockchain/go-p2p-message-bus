@@ -60,4 +60,10 @@ type Config struct {
 	// If not provided or zero, defaults to 24 hours (same as go-ethereum).
 	// Set to a negative value to disable TTL-based eviction.
 	PeerCacheTTL time.Duration
+
+	// RelayPeers is an optional list of multiaddr strings for relay servers.
+	// If provided, these peers will be used for relay/circuit functionality when behind NAT.
+	// If not provided, bootstrap peers will be used as relays.
+	// Example: []string{"/ip4/1.2.3.4/tcp/4001/p2p/QmPeerID"}
+	RelayPeers []string
 }

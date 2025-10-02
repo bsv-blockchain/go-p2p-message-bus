@@ -88,15 +88,44 @@ func NewClient(config Config) (P2PClient, error) {
 		logger.Infof("Using custom announce addresses: %v", config.AnnounceAddrs)
 	}
 
+	// Get bootstrap peers from DHT library for DHT bootstrapping
+	bootstrapPeers := dht.GetDefaultBootstrapPeerAddrInfos()
+
+	// Determine which peers to use as relays
+	var relayPeers []peer.AddrInfo
+	if len(config.RelayPeers) > 0 {
+		// Use custom relay peers if provided
+		for _, relayStr := range config.RelayPeers {
+			maddr, err := multiaddr.NewMultiaddr(relayStr)
+			if err != nil {
+				logger.Warnf("Invalid relay address %s: %v", relayStr, err)
+				continue
+			}
+			addrInfo, err := peer.AddrInfoFromP2pAddr(maddr)
+			if err != nil {
+				logger.Warnf("Invalid relay peer info %s: %v", relayStr, err)
+				continue
+			}
+			relayPeers = append(relayPeers, *addrInfo)
+		}
+		logger.Infof("Using %d custom relay peer(s)", len(relayPeers))
+	} else {
+		// Fall back to bootstrap peers as relays
+		relayPeers = bootstrapPeers
+		logger.Infof("Using bootstrap peers as relays")
+	}
+
 	// Create libp2p host
 	hostOpts = append(hostOpts,
 		libp2p.ListenAddrStrings(
 			"/ip4/0.0.0.0/tcp/0",
 			"/ip6/::/tcp/0",
 		),
-		libp2p.EnableNATService(),
-		libp2p.EnableHolePunching(),
-		libp2p.EnableRelay(),
+		libp2p.NATPortMap(),                                 // Try UPnP/NAT-PMP for automatic port forwarding
+		libp2p.EnableNATService(),                           // AutoNAT to detect if we're reachable
+		libp2p.EnableHolePunching(),                         // DCUtR protocol for NAT hole punching
+		libp2p.EnableRelay(),                                // Act as relay for others
+		libp2p.EnableAutoRelayWithStaticRelays(relayPeers),  // Use configured relay peers
 	)
 
 	h, err := libp2p.New(hostOpts...)
@@ -109,7 +138,6 @@ func NewClient(config Config) (P2PClient, error) {
 	logger.Infof("Listening on: %v", h.Addrs())
 
 	// Set up DHT with bootstrap peers
-	bootstrapPeers := dht.GetDefaultBootstrapPeerAddrInfos()
 	kadDHT, err := dht.New(ctx, h, dht.Mode(dht.ModeServer), dht.BootstrapPeers(bootstrapPeers...))
 	if err != nil {
 		h.Close()
@@ -449,7 +477,10 @@ func (c *Client) findAndConnectPeers(ctx context.Context, routingDiscovery *drou
 					// Only log non-routine failures (skip common P2P discovery errors)
 					errStr := err.Error()
 					if !strings.Contains(errStr, "connection refused") &&
-						!strings.Contains(errStr, "rate limit exceeded") {
+						!strings.Contains(errStr, "rate limit exceeded") &&
+						!strings.Contains(errStr, "NO_RESERVATION") &&
+						!strings.Contains(errStr, "concurrent active dial") &&
+						!strings.Contains(errStr, "all dials failed") {
 						c.logger.Debugf("Failed to connect to discovered peer %s: %v", peer.ID.String(), err)
 					}
 				}
