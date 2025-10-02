@@ -19,8 +19,10 @@ func main() {
 	name := flag.String("name", "", "Your node name")
 	privateKey := flag.String("key", "", "Private key hex (will generate if not provided)")
 	topics := flag.String("topics", "broadcast_p2p_poc", "Comma-separated list of topics to subscribe to")
+	port := flag.Int("port", 0, "port to listen on (0 for random)")
 	noBroadcast := flag.Bool("no-broadcast", false, "Disable message broadcasting")
 	prettyJson := flag.Bool("pretty-json", false, "Pretty print JSON messages")
+	relays := flag.String("relays", "", "Comma-separated list of relay peer multiaddrs (e.g., /ip4/1.2.3.4/tcp/4001/p2p/PeerID)")
 
 	flag.Parse()
 
@@ -64,12 +66,22 @@ func main() {
 		}
 	}
 
+	// Parse relay peers list
+	var relayPeers []string
+	if *relays != "" {
+		for _, r := range strings.Split(*relays, ",") {
+			relayPeers = append(relayPeers, strings.TrimSpace(r))
+		}
+	}
+
 	// Create P2P client
 	client, err := p2p.NewClient(p2p.Config{
 		Name:          *name,
 		Logger:        logger,
 		PrivateKey:    privKey,
+		Port:          *port,
 		PeerCacheFile: "peer_cache.json", // Enable peer persistence
+		RelayPeers:    relayPeers,
 	})
 	if err != nil {
 		logger.Errorf("Failed to create P2P client: %v", err)
