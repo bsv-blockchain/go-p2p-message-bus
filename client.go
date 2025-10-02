@@ -118,14 +118,14 @@ func NewClient(config Config) (P2PClient, error) {
 	// Create libp2p host
 	hostOpts = append(hostOpts,
 		libp2p.ListenAddrStrings(
-			"/ip4/0.0.0.0/tcp/0",
-			"/ip6/::/tcp/0",
+			fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", config.Port), // Listen on all interfaces
+			fmt.Sprintf("/ip6/::/tcp/%d", config.Port),
 		),
-		libp2p.NATPortMap(),                                 // Try UPnP/NAT-PMP for automatic port forwarding
-		libp2p.EnableNATService(),                           // AutoNAT to detect if we're reachable
-		libp2p.EnableHolePunching(),                         // DCUtR protocol for NAT hole punching
-		libp2p.EnableRelay(),                                // Act as relay for others
-		libp2p.EnableAutoRelayWithStaticRelays(relayPeers),  // Use configured relay peers
+		libp2p.NATPortMap(),                                // Try UPnP/NAT-PMP for automatic port forwarding
+		libp2p.EnableNATService(),                          // AutoNAT to detect if we're reachable
+		libp2p.EnableHolePunching(),                        // DCUtR protocol for NAT hole punching
+		libp2p.EnableRelay(),                               // Act as relay for others
+		libp2p.EnableAutoRelayWithStaticRelays(relayPeers), // Use configured relay peers
 	)
 
 	h, err := libp2p.New(hostOpts...)

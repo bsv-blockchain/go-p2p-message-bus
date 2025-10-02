@@ -55,6 +55,9 @@ type Config struct {
 	// If not provided, libp2p will automatically detect and announce local addresses.
 	AnnounceAddrs []string
 
+	// Port is the network port to listen on for incoming connections. If zero, a random port will be chosen.
+	Port int
+
 	// PeerCacheTTL is the duration after which unseen peers are removed from the cache.
 	// Peers not seen for longer than this duration will be evicted on next cache load.
 	// If not provided or zero, defaults to 24 hours (same as go-ethereum).
