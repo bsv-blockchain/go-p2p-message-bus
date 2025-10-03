@@ -133,6 +133,10 @@ func NewClient(config Config) (P2PClient, error) {
 		libp2p.EnableAutoRelayWithStaticRelays(relayPeers), // Use configured relay peers
 	)
 
+	if config.ProtocolVersion != "" {
+		hostOpts = append(hostOpts, libp2p.ProtocolVersion(config.ProtocolVersion))
+	}
+
 	h, err := libp2p.New(hostOpts...)
 	if err != nil {
 		cancel()
@@ -236,8 +240,6 @@ func NewClient(config Config) (P2PClient, error) {
 // The returned channel will be closed when the client is closed.
 func (c *Client) Subscribe(topic string) <-chan Message {
 	msgChan := make(chan Message, 100)
-
-	topic = fmt.Sprintf("%s/%s", c.config.ProtocolID, topic)
 
 	c.logger.Debugf("Subscribing to topic: %s", topic)
 

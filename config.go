@@ -44,7 +44,7 @@ type Config struct {
 	PrivateKey crypto.PrivKey
 
 	// This is used to namespace all topics that we publish to and subscribe to.
-	ProtocolID string
+	ProtocolVersion string
 
 	// PeerCacheFile is an optional path to a file for persisting peer information.
 	// If provided, the client will save connected peers to this file and reload them
