@@ -237,6 +237,10 @@ func NewClient(config Config) (P2PClient, error) {
 func (c *Client) Subscribe(topic string) <-chan Message {
 	msgChan := make(chan Message, 100)
 
+	topic = fmt.Sprintf("%s/%s", c.config.ProtocolID, topic)
+
+	c.logger.Debugf("Subscribing to topic: %s", topic)
+
 	c.mu.Lock()
 	c.msgChans[topic] = msgChan
 	c.mu.Unlock()

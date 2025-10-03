@@ -43,6 +43,9 @@ type Config struct {
 	// Use GeneratePrivateKeyHex() to create a new key for first-time setup.
 	PrivateKey crypto.PrivKey
 
+	// This is used to namespace all topics that we publish to and subscribe to.
+	ProtocolID string
+
 	// PeerCacheFile is an optional path to a file for persisting peer information.
 	// If provided, the client will save connected peers to this file and reload them
 	// on restart for faster reconnection. If not provided, peer caching is disabled.
