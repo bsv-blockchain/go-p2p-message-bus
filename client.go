@@ -488,28 +488,37 @@ func (c *Client) findAndConnectPeers(ctx context.Context, routingDiscovery *drou
 			continue
 		}
 
-		go func(ctx context.Context) {
-			for peer := range peerChan {
-				if peer.ID == c.host.ID() {
-					continue
-				}
-				// Skip peers with no addresses
-				if len(peer.Addrs) == 0 {
-					continue
-				}
-				if err := c.host.Connect(ctx, peer); err != nil {
-					// Only log non-routine failures (skip common P2P discovery errors)
-					errStr := err.Error()
-					if !strings.Contains(errStr, "connection refused") &&
-						!strings.Contains(errStr, "rate limit exceeded") &&
-						!strings.Contains(errStr, "NO_RESERVATION") &&
-						!strings.Contains(errStr, "concurrent active dial") &&
-						!strings.Contains(errStr, "all dials failed") {
-						c.logger.Debugf("Failed to connect to discovered peer %s: %v", peer.ID.String(), err)
+		go func(ctx context.Context, topic string) {
+			discCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			defer cancel()
+
+			for {
+				select {
+				case <-discCtx.Done():
+					return
+				case peer, ok := <-peerChan:
+					if !ok {
+						return
+					}
+					if peer.ID == c.host.ID() {
+						continue
+					}
+					if len(peer.Addrs) == 0 {
+						continue
+					}
+					if err := c.host.Connect(ctx, peer); err != nil {
+						errStr := err.Error()
+						if !strings.Contains(errStr, "connection refused") &&
+							!strings.Contains(errStr, "rate limit exceeded") &&
+							!strings.Contains(errStr, "NO_RESERVATION") &&
+							!strings.Contains(errStr, "concurrent active dial") &&
+							!strings.Contains(errStr, "all dials failed") {
+							c.logger.Debugf("Failed to connect to discovered peer %s: %v", peer.ID.String(), err)
+						}
 					}
 				}
 			}
-		}(ctx)
+		}(ctx, topic)
 	}
 }
 
