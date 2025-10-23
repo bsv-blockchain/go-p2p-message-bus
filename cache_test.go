@@ -11,6 +11,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const (
+	testAddrLocalhost = "/ip4/127.0.0.1/tcp/4001"
+	testAddrRemote    = "/ip4/192.168.1.1/tcp/4001"
+	testCacheFileName = "cache.json"
+)
+
 func TestLoadPeerCacheFileNotExists(t *testing.T) {
 	logger := &DefaultLogger{}
 	nonExistentFile := filepath.Join(t.TempDir(), "nonexistent.json")
@@ -33,7 +39,7 @@ func TestLoadPeerCacheValidFile(t *testing.T) {
 				{
 					ID:       "QmYyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N",
 					Name:     "peer1",
-					Addrs:    []string{"/ip4/127.0.0.1/tcp/4001"},
+					Addrs:    []string{testAddrLocalhost},
 					LastSeen: time.Now(),
 				},
 			},
@@ -46,13 +52,13 @@ func TestLoadPeerCacheValidFile(t *testing.T) {
 				{
 					ID:       "QmYyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N",
 					Name:     "peer1",
-					Addrs:    []string{"/ip4/127.0.0.1/tcp/4001"},
+					Addrs:    []string{testAddrLocalhost},
 					LastSeen: time.Now(),
 				},
 				{
 					ID:       "QmaBcDeFgHiJkLmNoPqRsTuVwXyZ123456789AbCdEf",
 					Name:     "peer2",
-					Addrs:    []string{"/ip4/192.168.1.1/tcp/4001"},
+					Addrs:    []string{testAddrRemote},
 					LastSeen: time.Now(),
 				},
 			},
@@ -65,7 +71,7 @@ func TestLoadPeerCacheValidFile(t *testing.T) {
 				{
 					ID:       "QmYyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N",
 					Name:     "peer1",
-					Addrs:    []string{"/ip4/127.0.0.1/tcp/4001"},
+					Addrs:    []string{testAddrLocalhost},
 					LastSeen: time.Now().Add(-48 * time.Hour), // Old peer
 				},
 			},
@@ -77,7 +83,7 @@ func TestLoadPeerCacheValidFile(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			logger := &DefaultLogger{}
-			cacheFile := filepath.Join(t.TempDir(), "cache.json")
+			cacheFile := filepath.Join(t.TempDir(), testCacheFileName)
 
 			// Write test data
 			data, err := json.MarshalIndent(tt.cacheData, "", "  ")
@@ -146,7 +152,7 @@ func TestSavePeerCacheValidData(t *testing.T) {
 				{
 					ID:       "QmYyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N",
 					Name:     "alice",
-					Addrs:    []string{"/ip4/127.0.0.1/tcp/4001"},
+					Addrs:    []string{testAddrLocalhost},
 					LastSeen: time.Now(),
 				},
 			},
@@ -157,13 +163,13 @@ func TestSavePeerCacheValidData(t *testing.T) {
 				{
 					ID:       "QmYyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N",
 					Name:     "alice",
-					Addrs:    []string{"/ip4/127.0.0.1/tcp/4001"},
+					Addrs:    []string{testAddrLocalhost},
 					LastSeen: time.Now(),
 				},
 				{
 					ID:       "QmaBcDeFgHiJkLmNoPqRsTuVwXyZ123456789AbCdEf",
 					Name:     "bob",
-					Addrs:    []string{"/ip4/192.168.1.1/tcp/4001", "/ip6/::1/tcp/4001"},
+					Addrs:    []string{testAddrRemote, "/ip6/::1/tcp/4001"},
 					LastSeen: time.Now(),
 				},
 			},
@@ -177,7 +183,7 @@ func TestSavePeerCacheValidData(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			logger := &DefaultLogger{}
-			cacheFile := filepath.Join(t.TempDir(), "cache.json")
+			cacheFile := filepath.Join(t.TempDir(), testCacheFileName)
 
 			savePeerCache(tt.peers, cacheFile, logger)
 
@@ -400,7 +406,7 @@ func TestLoadPeerCacheWithTTLEviction(t *testing.T) {
 				{
 					ID:       "peer1",
 					Name:     "alice",
-					Addrs:    []string{"/ip4/127.0.0.1/tcp/4001"},
+					Addrs:    []string{testAddrLocalhost},
 					LastSeen: now.Add(-1 * time.Hour),
 				},
 			},
@@ -413,7 +419,7 @@ func TestLoadPeerCacheWithTTLEviction(t *testing.T) {
 				{
 					ID:       "peer1",
 					Name:     "alice",
-					Addrs:    []string{"/ip4/127.0.0.1/tcp/4001"},
+					Addrs:    []string{testAddrLocalhost},
 					LastSeen: now.Add(-48 * time.Hour),
 				},
 			},
@@ -426,13 +432,13 @@ func TestLoadPeerCacheWithTTLEviction(t *testing.T) {
 				{
 					ID:       "peer1",
 					Name:     "alice",
-					Addrs:    []string{"/ip4/127.0.0.1/tcp/4001"},
+					Addrs:    []string{testAddrLocalhost},
 					LastSeen: now.Add(-1 * time.Hour),
 				},
 				{
 					ID:       "peer2",
 					Name:     "bob",
-					Addrs:    []string{"/ip4/192.168.1.1/tcp/4001"},
+					Addrs:    []string{testAddrRemote},
 					LastSeen: now.Add(-48 * time.Hour),
 				},
 			},
@@ -443,7 +449,7 @@ func TestLoadPeerCacheWithTTLEviction(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cacheFile := filepath.Join(t.TempDir(), "cache.json")
+			cacheFile := filepath.Join(t.TempDir(), testCacheFileName)
 
 			// Write test data
 			data, err := json.MarshalIndent(tt.cacheData, "", "  ")
@@ -466,7 +472,7 @@ func TestLoadPeerCacheWithTTLEviction(t *testing.T) {
 
 func TestSavePeerCacheFilePermissions(t *testing.T) {
 	logger := &DefaultLogger{}
-	cacheFile := filepath.Join(t.TempDir(), "cache.json")
+	cacheFile := filepath.Join(t.TempDir(), testCacheFileName)
 
 	peers := []cachedPeer{
 		{
@@ -490,7 +496,7 @@ func TestSavePeerCacheFilePermissions(t *testing.T) {
 
 func TestLoadAndSavePeerCacheRoundTrip(t *testing.T) {
 	logger := &DefaultLogger{}
-	cacheFile := filepath.Join(t.TempDir(), "cache.json")
+	cacheFile := filepath.Join(t.TempDir(), testCacheFileName)
 	now := time.Now()
 
 	originalPeers := []cachedPeer{

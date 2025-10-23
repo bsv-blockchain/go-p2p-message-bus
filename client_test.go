@@ -11,6 +11,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const (
+	testPeerName              = "test-peer"
+	testTopicName             = "test-topic"
+	testPeerCacheFileName     = "peers.json"
+	testInvalidAnnounceErrMsg = "invalid announce address"
+)
+
 func TestNewClientMissingName(t *testing.T) {
 	privKey, err := GeneratePrivateKey()
 	require.NoError(t, err)
@@ -29,7 +36,7 @@ func TestNewClientMissingName(t *testing.T) {
 
 func TestNewClientMissingPrivateKey(t *testing.T) {
 	config := Config{
-		Name:       "test-peer",
+		Name:       testPeerName,
 		PrivateKey: nil, // Missing required field
 	}
 
@@ -45,7 +52,7 @@ func TestNewClientInvalidAnnounceAddr(t *testing.T) {
 	require.NoError(t, err)
 
 	config := Config{
-		Name:          "test-peer",
+		Name:          testPeerName,
 		PrivateKey:    privKey,
 		AnnounceAddrs: []string{"invalid-multiaddr"},
 	}
@@ -53,7 +60,7 @@ func TestNewClientInvalidAnnounceAddr(t *testing.T) {
 	client, err := NewClient(config)
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid announce address")
+	assert.Contains(t, err.Error(), testInvalidAnnounceErrMsg)
 	assert.Nil(t, client)
 }
 
@@ -62,7 +69,7 @@ func TestNewClientMinimalConfig(t *testing.T) {
 	require.NoError(t, err)
 
 	config := Config{
-		Name:       "test-peer",
+		Name:       testPeerName,
 		PrivateKey: privKey,
 	}
 
@@ -83,7 +90,7 @@ func TestNewClientWithCustomLogger(t *testing.T) {
 	customLogger := &DefaultLogger{}
 
 	config := Config{
-		Name:       "test-peer",
+		Name:       testPeerName,
 		PrivateKey: privKey,
 		Logger:     customLogger,
 	}
@@ -102,7 +109,7 @@ func TestNewClientWithPort(t *testing.T) {
 	require.NoError(t, err)
 
 	config := Config{
-		Name:       "test-peer",
+		Name:       testPeerName,
 		PrivateKey: privKey,
 		Port:       0, // Random port
 	}
@@ -120,10 +127,10 @@ func TestNewClientWithPeerCacheFile(t *testing.T) {
 	privKey, err := GeneratePrivateKey()
 	require.NoError(t, err)
 
-	cacheFile := filepath.Join(t.TempDir(), "peers.json")
+	cacheFile := filepath.Join(t.TempDir(), testPeerCacheFileName)
 
 	config := Config{
-		Name:          "test-peer",
+		Name:          testPeerName,
 		PrivateKey:    privKey,
 		PeerCacheFile: cacheFile,
 	}
@@ -142,7 +149,7 @@ func TestNewClientWithProtocolVersion(t *testing.T) {
 	require.NoError(t, err)
 
 	config := Config{
-		Name:            "test-peer",
+		Name:            testPeerName,
 		PrivateKey:      privKey,
 		ProtocolVersion: "test/1.0.0",
 	}
@@ -161,7 +168,7 @@ func TestClientGetID(t *testing.T) {
 	require.NoError(t, err)
 
 	config := Config{
-		Name:       "test-peer",
+		Name:       testPeerName,
 		PrivateKey: privKey,
 	}
 
@@ -186,7 +193,7 @@ func TestClientGetIDConsistency(t *testing.T) {
 	require.NoError(t, err)
 
 	config := Config{
-		Name:       "test-peer",
+		Name:       testPeerName,
 		PrivateKey: privKey,
 	}
 
@@ -212,7 +219,7 @@ func TestClientGetPeersEmpty(t *testing.T) {
 	require.NoError(t, err)
 
 	config := Config{
-		Name:       "test-peer",
+		Name:       testPeerName,
 		PrivateKey: privKey,
 	}
 
@@ -235,7 +242,7 @@ func TestClientClose(t *testing.T) {
 	require.NoError(t, err)
 
 	config := Config{
-		Name:       "test-peer",
+		Name:       testPeerName,
 		PrivateKey: privKey,
 	}
 
@@ -251,7 +258,7 @@ func TestClientCloseTimeout(t *testing.T) {
 	require.NoError(t, err)
 
 	config := Config{
-		Name:       "test-peer",
+		Name:       testPeerName,
 		PrivateKey: privKey,
 	}
 
@@ -277,7 +284,7 @@ func TestClientSubscribe(t *testing.T) {
 	require.NoError(t, err)
 
 	config := Config{
-		Name:       "test-peer",
+		Name:       testPeerName,
 		PrivateKey: privKey,
 	}
 
@@ -288,7 +295,7 @@ func TestClientSubscribe(t *testing.T) {
 		require.NoError(t, err)
 	}()
 
-	msgChan := client.Subscribe("test-topic")
+	msgChan := client.Subscribe(testTopicName)
 
 	require.NotNil(t, msgChan)
 
@@ -308,7 +315,7 @@ func TestClientSubscribeMultipleTopics(t *testing.T) {
 	require.NoError(t, err)
 
 	config := Config{
-		Name:       "test-peer",
+		Name:       testPeerName,
 		PrivateKey: privKey,
 	}
 
@@ -339,7 +346,7 @@ func TestClientPublish(t *testing.T) {
 	require.NoError(t, err)
 
 	config := Config{
-		Name:       "test-peer",
+		Name:       testPeerName,
 		PrivateKey: privKey,
 	}
 
@@ -353,7 +360,7 @@ func TestClientPublish(t *testing.T) {
 	ctx := context.Background()
 	testData := []byte("test message")
 
-	err = client.Publish(ctx, "test-topic", testData)
+	err = client.Publish(ctx, testTopicName, testData)
 
 	// Publishing should succeed even with no subscribers
 	require.NoError(t, err)
@@ -364,7 +371,7 @@ func TestClientPublishWithContext(t *testing.T) {
 	require.NoError(t, err)
 
 	config := Config{
-		Name:       "test-peer",
+		Name:       testPeerName,
 		PrivateKey: privKey,
 	}
 
@@ -380,7 +387,7 @@ func TestClientPublishWithContext(t *testing.T) {
 
 	testData := []byte("test message")
 
-	err = client.Publish(ctx, "test-topic", testData)
+	err = client.Publish(ctx, testTopicName, testData)
 	require.NoError(t, err)
 }
 
@@ -507,7 +514,7 @@ func TestShouldLogConnectionError(t *testing.T) {
 	require.NoError(t, err)
 
 	config := Config{
-		Name:       "test-peer",
+		Name:       testPeerName,
 		PrivateKey: privKey,
 	}
 
@@ -615,7 +622,7 @@ func TestBuildHostOptionsWithAnnounceAddrs(t *testing.T) {
 			name:          "invalid announce address",
 			announceAddrs: []string{"invalid-address"},
 			wantErr:       true,
-			errContains:   "invalid announce address",
+			errContains:   testInvalidAnnounceErrMsg,
 		},
 		{
 			name:          "empty announce addresses",
@@ -661,7 +668,7 @@ func TestNewClientReturnsClientInterface(t *testing.T) {
 	require.NoError(t, err)
 
 	config := Config{
-		Name:       "test-peer",
+		Name:       testPeerName,
 		PrivateKey: privKey,
 	}
 
@@ -681,10 +688,10 @@ func TestClientPeerCacheTTLDefault(t *testing.T) {
 	privKey, err := GeneratePrivateKey()
 	require.NoError(t, err)
 
-	cacheFile := filepath.Join(t.TempDir(), "peers.json")
+	cacheFile := filepath.Join(t.TempDir(), testPeerCacheFileName)
 
 	config := Config{
-		Name:          "test-peer",
+		Name:          testPeerName,
 		PrivateKey:    privKey,
 		PeerCacheFile: cacheFile,
 		PeerCacheTTL:  0, // Should use default of 24 hours
@@ -701,10 +708,10 @@ func TestClientPeerCacheTTLCustom(t *testing.T) {
 	privKey, err := GeneratePrivateKey()
 	require.NoError(t, err)
 
-	cacheFile := filepath.Join(t.TempDir(), "peers.json")
+	cacheFile := filepath.Join(t.TempDir(), testPeerCacheFileName)
 
 	config := Config{
-		Name:          "test-peer",
+		Name:          testPeerName,
 		PrivateKey:    privKey,
 		PeerCacheFile: cacheFile,
 		PeerCacheTTL:  1 * time.Hour, // Custom TTL
