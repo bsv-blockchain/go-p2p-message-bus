@@ -168,6 +168,24 @@ func TestPeerTrackerRecordMessageFromUpdatesTimestamp(t *testing.T) {
 	assert.True(t, secondSeen.After(firstSeen))
 }
 
+// assertPeersMatch verifies that all expected peers are present in the actual peer list
+func assertPeersMatch(t *testing.T, expected, actual []peer.ID) {
+	t.Helper()
+
+	assert.Len(t, actual, len(expected))
+
+	for _, expectedPeer := range expected {
+		found := false
+		for _, peer := range actual {
+			if peer == expectedPeer {
+				found = true
+				break
+			}
+		}
+		assert.True(t, found, "expected peer %s not found in result", expectedPeer)
+	}
+}
+
 func TestPeerTrackerGetAllTopicPeers(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -207,22 +225,8 @@ func TestPeerTrackerGetAllTopicPeers(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			tracker := newPeerTracker()
 			expectedPeers := tt.setupFunc(tracker, t)
-
 			peers := tracker.getAllTopicPeers()
-
-			assert.Len(t, peers, len(expectedPeers))
-
-			// Verify all expected peers are present
-			for _, expectedPeer := range expectedPeers {
-				found := false
-				for _, peer := range peers {
-					if peer == expectedPeer {
-						found = true
-						break
-					}
-				}
-				assert.True(t, found, "expected peer %s not found in result", expectedPeer)
-			}
+			assertPeersMatch(t, expectedPeers, peers)
 		})
 	}
 }
