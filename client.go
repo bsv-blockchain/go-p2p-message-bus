@@ -1,3 +1,6 @@
+// Package p2p provides a peer-to-peer messaging client built on libp2p.
+// It supports topic-based publish/subscribe messaging with automatic peer discovery,
+// NAT traversal, and relay functionality.
 package p2p
 
 import (
@@ -5,6 +8,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -25,11 +29,18 @@ import (
 	"github.com/multiformats/go-multiaddr"
 )
 
-// Compile-time check to ensure Client implements P2PClient interface
-var _ P2PClient = (*Client)(nil)
+var (
+	// ErrNameRequired is returned when Config.Name is not provided.
+	ErrNameRequired = errors.New("config.Name is required")
+	// ErrPrivateKeyRequired is returned when Config.PrivateKey is not provided.
+	ErrPrivateKeyRequired = errors.New("config.PrivateKey is required")
+)
 
-// Client represents a P2P messaging client.
-type Client struct {
+// Compile-time check to ensure client implements Client interface
+var _ Client = (*client)(nil)
+
+// client represents a P2P messaging client implementation.
+type client struct {
 	config      Config
 	host        host.Host
 	dht         *dht.IpfsDHT
@@ -39,7 +50,7 @@ type Client struct {
 	msgChans    map[string]chan Message
 	mu          sync.RWMutex
 	peerTracker *peerTracker
-	ctx         context.Context
+	ctx         context.Context //nolint:containedctx // Client manages its own lifecycle
 	cancel      context.CancelFunc
 	mdnsService mdns.Service
 	logger      logger
@@ -47,32 +58,106 @@ type Client struct {
 
 // NewClient creates and initializes a new P2P client.
 // It automatically starts the client and begins peer discovery.
-func NewClient(config Config) (P2PClient, error) {
+func NewClient(config Config) (Client, error) {
 	if config.Name == "" {
-		return nil, fmt.Errorf("config.Name is required")
+		return nil, ErrNameRequired
 	}
 
 	// Use provided logger or default
-	logger := config.Logger
-	if logger == nil {
-		logger = &DefaultLogger{}
-		logger.Debugf("Using default logger")
-	}
-
+	clientLogger := getLogger(config.Logger)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Validate private key (required)
 	if config.PrivateKey == nil {
 		cancel()
-		return nil, fmt.Errorf("config.PrivateKey is required")
+		return nil, ErrPrivateKeyRequired
 	}
 
-	var hostOpts []libp2p.Option
-	hostOpts = append(hostOpts, libp2p.Identity(config.PrivateKey))
+	// Build host options
+	hostOpts, err := buildHostOptions(config, clientLogger, cancel)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get bootstrap peers from DHT library for DHT bootstrapping
+	bootstrapPeers := dht.GetDefaultBootstrapPeerAddrInfos()
+
+	// Determine which peers to use as relays
+	relayPeers := configureRelayPeers(config.RelayPeers, bootstrapPeers, clientLogger)
+
+	// Create and setup libp2p host
+	h, err := createHost(ctx, hostOpts, config, relayPeers, clientLogger, cancel)
+	if err != nil {
+		return nil, err
+	}
+
+	// Set up DHT
+	kadDHT, err := setupDHT(ctx, h, bootstrapPeers, clientLogger, cancel)
+	if err != nil {
+		return nil, err
+	}
+
+	// Connect to various peer types
+	connectToBootstrapPeers(ctx, h, bootstrapPeers, clientLogger)
+	connectToRelayPeers(ctx, h, relayPeers, len(config.RelayPeers) > 0, clientLogger)
+	loadAndConnectCachedPeers(ctx, h, config, clientLogger)
+
+	// Create pubsub
+	ps, err := pubsub.NewGossipSub(ctx, h)
+	if err != nil {
+		_ = h.Close()
+		cancel()
+		return nil, fmt.Errorf("failed to create pubsub: %w", err)
+	}
+
+	// Set up mDNS discovery
+	mdnsService := mdns.NewMdnsService(h, "", &discoveryNotifee{h: h, ctx: ctx, logger: clientLogger})
+	if err := mdnsService.Start(); err != nil {
+		clientLogger.Errorf("mDNS failed to start: %v", err)
+	} else {
+		clientLogger.Infof("mDNS discovery started")
+	}
+
+	c := &client{
+		config:      config,
+		host:        h,
+		dht:         kadDHT,
+		pubsub:      ps,
+		topics:      make(map[string]*pubsub.Topic),
+		subs:        make(map[string]*pubsub.Subscription),
+		msgChans:    make(map[string]chan Message),
+		peerTracker: newPeerTracker(),
+		ctx:         ctx,
+		cancel:      cancel,
+		mdnsService: mdnsService,
+		logger:      clientLogger,
+	}
+
+	// Start DHT discovery
+	routingDiscovery := drouting.NewRoutingDiscovery(kadDHT)
+	go c.waitForDHTAndAdvertise(ctx, routingDiscovery)
+	go c.discoverPeers(ctx, routingDiscovery, true)
+
+	return c, nil
+}
+
+// Helper functions for NewClient
+
+func getLogger(configLogger logger) logger {
+	if configLogger == nil {
+		l := &DefaultLogger{}
+		l.Debugf("Using default logger")
+		return l
+	}
+	return configLogger
+}
+
+func buildHostOptions(config Config, log logger, cancel context.CancelFunc) ([]libp2p.Option, error) {
+	hostOpts := []libp2p.Option{libp2p.Identity(config.PrivateKey)}
 
 	// Configure announce addresses if provided (useful for K8s)
 	if len(config.AnnounceAddrs) > 0 {
-		var announceAddrs []multiaddr.Multiaddr
+		announceAddrs := make([]multiaddr.Multiaddr, 0, len(config.AnnounceAddrs))
 		for _, addrStr := range config.AnnounceAddrs {
 			maddr, err := multiaddr.NewMultiaddr(addrStr)
 			if err != nil {
@@ -85,52 +170,23 @@ func NewClient(config Config) (P2PClient, error) {
 		hostOpts = append(hostOpts, libp2p.AddrsFactory(func([]multiaddr.Multiaddr) []multiaddr.Multiaddr {
 			return announceAddrs
 		}))
-		logger.Infof("Using custom announce addresses: %v", config.AnnounceAddrs)
+		log.Infof("Using custom announce addresses: %v", config.AnnounceAddrs)
 	}
 
-	// Get bootstrap peers from DHT library for DHT bootstrapping
-	bootstrapPeers := dht.GetDefaultBootstrapPeerAddrInfos()
+	return hostOpts, nil
+}
 
-	// Determine which peers to use as relays
-	var relayPeers []peer.AddrInfo
-	if len(config.RelayPeers) > 0 {
-		// Use custom relay peers if provided
-		for _, relayStr := range config.RelayPeers {
-			maddr, err := multiaddr.NewMultiaddr(relayStr)
-			if err != nil {
-				logger.Errorf("Invalid relay address %s: %v (hint: use /dns4/ for hostnames, /ip4/ for IP addresses)", relayStr, err)
-				continue
-			}
-			addrInfo, err := peer.AddrInfoFromP2pAddr(maddr)
-			if err != nil {
-				logger.Errorf("Invalid relay peer info %s: %v", relayStr, err)
-				continue
-			}
-			relayPeers = append(relayPeers, *addrInfo)
-		}
-		if len(relayPeers) > 0 {
-			logger.Infof("Using %d custom relay peer(s)", len(relayPeers))
-		} else {
-			logger.Warnf("No valid custom relay peers found, falling back to bootstrap peers as relays")
-			relayPeers = bootstrapPeers
-		}
-	} else {
-		// Fall back to bootstrap peers as relays
-		relayPeers = bootstrapPeers
-		logger.Infof("Using bootstrap peers as relays")
-	}
-
-	// Create libp2p host
+func createHost(_ context.Context, hostOpts []libp2p.Option, config Config, relayPeers []peer.AddrInfo, log logger, cancel context.CancelFunc) (host.Host, error) {
 	hostOpts = append(hostOpts,
 		libp2p.ListenAddrStrings(
-			fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", config.Port), // Listen on all interfaces
+			fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", config.Port),
 			fmt.Sprintf("/ip6/::/tcp/%d", config.Port),
 		),
-		libp2p.NATPortMap(),                                // Try UPnP/NAT-PMP for automatic port forwarding
-		libp2p.EnableNATService(),                          // AutoNAT to detect if we're reachable
-		libp2p.EnableHolePunching(),                        // DCUtR protocol for NAT hole punching
-		libp2p.EnableRelay(),                               // Act as relay for others
-		libp2p.EnableAutoRelayWithStaticRelays(relayPeers), // Use configured relay peers
+		libp2p.NATPortMap(),
+		libp2p.EnableNATService(),
+		libp2p.EnableHolePunching(),
+		libp2p.EnableRelay(),
+		libp2p.EnableAutoRelayWithStaticRelays(relayPeers),
 	)
 
 	if config.ProtocolVersion != "" {
@@ -143,102 +199,104 @@ func NewClient(config Config) (P2PClient, error) {
 		return nil, fmt.Errorf("failed to create host: %w", err)
 	}
 
-	logger.Infof("P2P Client created. ID: %s", h.ID())
-	logger.Infof("Listening on: %v", h.Addrs())
+	log.Infof("P2P Client created. ID: %s", h.ID())
+	log.Infof("Listening on: %v", h.Addrs())
+	return h, nil
+}
 
-	// Set up DHT with bootstrap peers
+func setupDHT(ctx context.Context, h host.Host, bootstrapPeers []peer.AddrInfo, _ logger, cancel context.CancelFunc) (*dht.IpfsDHT, error) {
 	kadDHT, err := dht.New(ctx, h, dht.Mode(dht.ModeServer), dht.BootstrapPeers(bootstrapPeers...))
 	if err != nil {
-		h.Close()
+		_ = h.Close()
 		cancel()
 		return nil, fmt.Errorf("failed to create DHT: %w", err)
 	}
 
-	if err := kadDHT.Bootstrap(ctx); err != nil {
-		h.Close()
+	if bootstrapErr := kadDHT.Bootstrap(ctx); bootstrapErr != nil {
+		_ = h.Close()
 		cancel()
-		return nil, fmt.Errorf("failed to bootstrap DHT: %w", err)
+		return nil, fmt.Errorf("failed to bootstrap DHT: %w", bootstrapErr)
 	}
 
-	// Connect to bootstrap peers
-	for _, peerInfo := range bootstrapPeers {
+	return kadDHT, nil
+}
+
+func configureRelayPeers(relayPeersConfig []string, bootstrapPeers []peer.AddrInfo, log logger) []peer.AddrInfo {
+	if len(relayPeersConfig) == 0 {
+		log.Infof("Using bootstrap peers as relays")
+		return bootstrapPeers
+	}
+
+	relayPeers := make([]peer.AddrInfo, 0, len(relayPeersConfig))
+	for _, relayStr := range relayPeersConfig {
+		maddr, err := multiaddr.NewMultiaddr(relayStr)
+		if err != nil {
+			log.Errorf("Invalid relay address %s: %v (hint: use /dns4/ for hostnames, /ip4/ for IP addresses)", relayStr, err)
+			continue
+		}
+		addrInfo, err := peer.AddrInfoFromP2pAddr(maddr)
+		if err != nil {
+			log.Errorf("Invalid relay peer info %s: %v", relayStr, err)
+			continue
+		}
+		relayPeers = append(relayPeers, *addrInfo)
+	}
+
+	if len(relayPeers) > 0 {
+		log.Infof("Using %d custom relay peer(s)", len(relayPeers))
+		return relayPeers
+	}
+
+	log.Warnf("No valid custom relay peers found, falling back to bootstrap peers as relays")
+	return bootstrapPeers
+}
+
+func connectToBootstrapPeers(ctx context.Context, h host.Host, peers []peer.AddrInfo, log logger) {
+	for _, peerInfo := range peers {
 		go func(pi peer.AddrInfo) {
-			if err := h.Connect(ctx, pi); err == nil {
-				logger.Infof("Connected to bootstrap peer: %s", pi.ID.String())
+			if connectErr := h.Connect(ctx, pi); connectErr == nil {
+				log.Infof("Connected to bootstrap peer: %s", pi.ID.String())
 			}
 		}(peerInfo)
 	}
+}
 
-	// If custom relay peers are defined, connect to them immediately as regular peers
-	if len(config.RelayPeers) > 0 {
-		for _, relayPeer := range relayPeers {
-			go func(pi peer.AddrInfo) {
-				if err := h.Connect(ctx, pi); err == nil {
-					logger.Infof("Connected to relay peer: %s", pi.ID.String())
-				} else {
-					logger.Warnf("Failed to connect to relay peer %s: %v", pi.ID.String(), err)
-				}
-			}(relayPeer)
-		}
+func connectToRelayPeers(ctx context.Context, h host.Host, peers []peer.AddrInfo, hasCustomRelays bool, log logger) {
+	if !hasCustomRelays {
+		return
 	}
 
-	// Load and connect to cached peers
-	if config.PeerCacheFile != "" {
-		// Default TTL is 24 hours (same as go-ethereum)
-		ttl := config.PeerCacheTTL
-		if ttl == 0 {
-			ttl = 24 * time.Hour
-		}
-		cachedPeers := loadPeerCache(config.PeerCacheFile, ttl, logger)
-		if len(cachedPeers) > 0 {
-			logger.Infof("Connecting to %d cached peers...", len(cachedPeers))
+	for _, relayPeer := range peers {
+		go func(pi peer.AddrInfo) {
+			if connectErr := h.Connect(ctx, pi); connectErr == nil {
+				log.Infof("Connected to relay peer: %s", pi.ID.String())
+			} else {
+				log.Warnf("Failed to connect to relay peer %s: %v", pi.ID.String(), connectErr)
+			}
+		}(relayPeer)
+	}
+}
 
-			connectToCachedPeers(ctx, h, cachedPeers, logger)
-		}
+func loadAndConnectCachedPeers(ctx context.Context, h host.Host, config Config, log logger) {
+	if config.PeerCacheFile == "" {
+		return
 	}
 
-	// Create pubsub
-	ps, err := pubsub.NewGossipSub(ctx, h)
-	if err != nil {
-		h.Close()
-		cancel()
-		return nil, fmt.Errorf("failed to create pubsub: %w", err)
+	ttl := config.PeerCacheTTL
+	if ttl == 0 {
+		ttl = 24 * time.Hour
 	}
 
-	// Set up mDNS discovery
-	mdnsService := mdns.NewMdnsService(h, "", &discoveryNotifee{h: h, ctx: ctx, logger: logger})
-	if err := mdnsService.Start(); err != nil {
-		logger.Errorf("mDNS failed to start: %v", err)
-	} else {
-		logger.Infof("mDNS discovery started")
+	cachedPeers := loadPeerCache(config.PeerCacheFile, ttl, log)
+	if len(cachedPeers) > 0 {
+		log.Infof("Connecting to %d cached peers...", len(cachedPeers))
+		connectToCachedPeers(ctx, h, cachedPeers, log)
 	}
-
-	client := &Client{
-		config:      config,
-		host:        h,
-		dht:         kadDHT,
-		pubsub:      ps,
-		topics:      make(map[string]*pubsub.Topic),
-		subs:        make(map[string]*pubsub.Subscription),
-		msgChans:    make(map[string]chan Message),
-		peerTracker: newPeerTracker(),
-		ctx:         ctx,
-		cancel:      cancel,
-		mdnsService: mdnsService,
-		logger:      logger,
-	}
-
-	// Start DHT discovery
-	routingDiscovery := drouting.NewRoutingDiscovery(kadDHT)
-	go client.waitForDHTAndAdvertise(ctx, routingDiscovery)
-	go client.discoverPeers(ctx, routingDiscovery, true)
-
-	return client, nil
 }
 
 // Subscribe subscribes to a topic and returns a channel that will receive messages.
 // The returned channel will be closed when the client is closed.
-func (c *Client) Subscribe(topic string) <-chan Message {
+func (c *client) Subscribe(topic string) <-chan Message {
 	msgChan := make(chan Message, 100)
 
 	c.logger.Debugf("Subscribing to topic: %s", topic)
@@ -281,7 +339,7 @@ func (c *Client) Subscribe(topic string) <-chan Message {
 
 		// Set up peer connection notifications for this topic
 		c.host.Network().Notify(&network.NotifyBundle{
-			ConnectedF: func(n network.Network, conn network.Conn) {
+			ConnectedF: func(_ network.Network, conn network.Conn) {
 				go func() {
 					time.Sleep(500 * time.Millisecond)
 					peerID := conn.RemotePeer()
@@ -296,7 +354,7 @@ func (c *Client) Subscribe(topic string) <-chan Message {
 					}
 				}()
 			},
-			DisconnectedF: func(n network.Network, conn network.Conn) {
+			DisconnectedF: func(_ network.Network, conn network.Conn) {
 				peerID := conn.RemotePeer()
 				topicPeers := t.ListPeers()
 				if slices.Contains(topicPeers, peerID) {
@@ -313,7 +371,7 @@ func (c *Client) Subscribe(topic string) <-chan Message {
 }
 
 // Publish publishes a message to the specified topic.
-func (c *Client) Publish(ctx context.Context, topic string, data []byte) error {
+func (c *client) Publish(ctx context.Context, topic string, data []byte) error {
 	c.mu.RLock()
 	t, ok := c.topics[topic]
 	c.mu.RUnlock()
@@ -348,7 +406,7 @@ func (c *Client) Publish(ctx context.Context, topic string, data []byte) error {
 }
 
 // GetPeers returns information about all known peers on subscribed topics.
-func (c *Client) GetPeers() []PeerInfo {
+func (c *client) GetPeers() []PeerInfo {
 	allTopicPeers := c.peerTracker.getAllTopicPeers()
 	peers := make([]PeerInfo, 0, len(allTopicPeers))
 
@@ -370,12 +428,12 @@ func (c *Client) GetPeers() []PeerInfo {
 }
 
 // GetID returns this peer's ID as a string.
-func (c *Client) GetID() string {
+func (c *client) GetID() string {
 	return c.host.ID().String()
 }
 
 // Close shuts down the client and releases all resources.
-func (c *Client) Close() error {
+func (c *client) Close() error {
 	c.cancel()
 
 	done := make(chan struct{})
@@ -393,16 +451,16 @@ func (c *Client) Close() error {
 
 		// Close all topics
 		for _, topic := range c.topics {
-			topic.Close()
+			_ = topic.Close()
 		}
 		c.mu.Unlock()
 
 		// Close services
 		if c.mdnsService != nil {
-			c.mdnsService.Close()
+			_ = c.mdnsService.Close()
 		}
-		c.dht.Close()
-		c.host.Close()
+		_ = c.dht.Close()
+		_ = c.host.Close()
 		close(done)
 	}()
 
@@ -417,7 +475,7 @@ func (c *Client) Close() error {
 
 // Internal methods
 
-func (c *Client) waitForDHTAndAdvertise(ctx context.Context, routingDiscovery *drouting.RoutingDiscovery) {
+func (c *client) waitForDHTAndAdvertise(ctx context.Context, routingDiscovery *drouting.RoutingDiscovery) {
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 	timeout := time.After(10 * time.Second)
@@ -453,7 +511,7 @@ func (c *Client) waitForDHTAndAdvertise(ctx context.Context, routingDiscovery *d
 	}
 }
 
-func (c *Client) discoverPeers(ctx context.Context, routingDiscovery *drouting.RoutingDiscovery, runImmediately bool) {
+func (c *client) discoverPeers(ctx context.Context, routingDiscovery *drouting.RoutingDiscovery, runImmediately bool) {
 	// Run discovery immediately on startup if requested
 	if runImmediately {
 		// Small delay to allow topics to be joined
@@ -474,7 +532,7 @@ func (c *Client) discoverPeers(ctx context.Context, routingDiscovery *drouting.R
 	}
 }
 
-func (c *Client) findAndConnectPeers(ctx context.Context, routingDiscovery *drouting.RoutingDiscovery) {
+func (c *client) findAndConnectPeers(ctx context.Context, routingDiscovery *drouting.RoutingDiscovery) {
 	c.mu.RLock()
 	topicsCopy := make([]string, 0, len(c.topics))
 	for topic := range c.topics {
@@ -487,42 +545,58 @@ func (c *Client) findAndConnectPeers(ctx context.Context, routingDiscovery *drou
 		if err != nil {
 			continue
 		}
-
-		go func(ctx context.Context, topic string) {
-			discCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-			defer cancel()
-
-			for {
-				select {
-				case <-discCtx.Done():
-					return
-				case peer, ok := <-peerChan:
-					if !ok {
-						return
-					}
-					if peer.ID == c.host.ID() {
-						continue
-					}
-					if len(peer.Addrs) == 0 {
-						continue
-					}
-					if err := c.host.Connect(ctx, peer); err != nil {
-						errStr := err.Error()
-						if !strings.Contains(errStr, "connection refused") &&
-							!strings.Contains(errStr, "rate limit exceeded") &&
-							!strings.Contains(errStr, "NO_RESERVATION") &&
-							!strings.Contains(errStr, "concurrent active dial") &&
-							!strings.Contains(errStr, "all dials failed") {
-							c.logger.Debugf("Failed to connect to discovered peer %s: %v", peer.ID.String(), err)
-						}
-					}
-				}
-			}
-		}(ctx, topic)
+		go c.processPeerDiscovery(ctx, peerChan)
 	}
 }
 
-func (c *Client) receiveMessages(sub *pubsub.Subscription, topic *pubsub.Topic, msgChan chan Message) {
+func (c *client) processPeerDiscovery(ctx context.Context, peerChan <-chan peer.AddrInfo) {
+	discCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	for {
+		select {
+		case <-discCtx.Done():
+			return
+		case peerInfo, ok := <-peerChan:
+			if !ok {
+				return
+			}
+			c.connectToDiscoveredPeer(ctx, peerInfo)
+		}
+	}
+}
+
+func (c *client) connectToDiscoveredPeer(ctx context.Context, peerInfo peer.AddrInfo) {
+	if peerInfo.ID == c.host.ID() || len(peerInfo.Addrs) == 0 {
+		return
+	}
+
+	if err := c.host.Connect(ctx, peerInfo); err != nil {
+		if c.shouldLogConnectionError(err) {
+			c.logger.Debugf("Failed to connect to discovered peer %s: %v", peerInfo.ID.String(), err)
+		}
+	}
+}
+
+func (c *client) shouldLogConnectionError(err error) bool {
+	errStr := err.Error()
+	ignoredErrors := []string{
+		"connection refused",
+		"rate limit exceeded",
+		"NO_RESERVATION",
+		"concurrent active dial",
+		"all dials failed",
+	}
+
+	for _, ignored := range ignoredErrors {
+		if strings.Contains(errStr, ignored) {
+			return false
+		}
+	}
+	return true
+}
+
+func (c *client) receiveMessages(sub *pubsub.Subscription, topic *pubsub.Topic, msgChan chan Message) {
 	for {
 		msg, err := sub.Next(c.ctx)
 		if err != nil {
@@ -566,7 +640,7 @@ func (c *Client) receiveMessages(sub *pubsub.Subscription, topic *pubsub.Topic, 
 	}
 }
 
-func (c *Client) savePeerCache() {
+func (c *client) savePeerCache() {
 	// Skip if peer caching is disabled
 	if c.config.PeerCacheFile == "" {
 		return
@@ -619,7 +693,7 @@ func (c *Client) savePeerCache() {
 
 type discoveryNotifee struct {
 	h      host.Host
-	ctx    context.Context
+	ctx    context.Context //nolint:containedctx // Required for peer connection in callback
 	logger logger
 }
 
@@ -634,6 +708,7 @@ func (n *discoveryNotifee) HandlePeerFound(pi peer.AddrInfo) {
 }
 
 func loadPeerCache(cacheFile string, ttl time.Duration, logger logger) []cachedPeer {
+	// #nosec G304 -- cacheFile is from config, not user input
 	file, err := os.Open(cacheFile)
 	if err != nil {
 		if !os.IsNotExist(err) {
@@ -641,7 +716,11 @@ func loadPeerCache(cacheFile string, ttl time.Duration, logger logger) []cachedP
 		}
 		return nil
 	}
-	defer file.Close()
+	defer func() {
+		if closeErr := file.Close(); closeErr != nil {
+			logger.Warnf("Failed to close peer cache file: %v", closeErr)
+		}
+	}()
 
 	data, err := io.ReadAll(file)
 	if err != nil {
@@ -660,7 +739,10 @@ func loadPeerCache(cacheFile string, ttl time.Duration, logger logger) []cachedP
 		return peers
 	}
 
-	// Evict stale peers based on TTL
+	return evictStalePeers(peers, ttl, logger)
+}
+
+func evictStalePeers(peers []cachedPeer, ttl time.Duration, logger logger) []cachedPeer {
 	now := time.Now()
 	threshold := now.Add(-ttl)
 	validPeers := make([]cachedPeer, 0, len(peers))
@@ -668,7 +750,6 @@ func loadPeerCache(cacheFile string, ttl time.Duration, logger logger) []cachedP
 
 	for _, p := range peers {
 		if p.LastSeen.IsZero() {
-			// Peers from old cache format without LastSeen - keep them but warn
 			logger.Debugf("Peer %s has no LastSeen timestamp, keeping for now", p.ID[:16])
 			validPeers = append(validPeers, p)
 		} else if p.LastSeen.After(threshold) {
@@ -692,7 +773,7 @@ func savePeerCache(peers []cachedPeer, cacheFile string, logger logger) {
 		return
 	}
 
-	if err := os.WriteFile(cacheFile, data, 0644); err != nil {
+	if err := os.WriteFile(cacheFile, data, 0o600); err != nil {
 		logger.Warnf("Failed to write peer cache: %v", err)
 	}
 }
