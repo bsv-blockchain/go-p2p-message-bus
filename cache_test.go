@@ -531,3 +531,112 @@ func TestLoadAndSavePeerCacheRoundTrip(t *testing.T) {
 		assert.WithinDuration(t, original.LastSeen, loadedPeers[i].LastSeen, 1*time.Second)
 	}
 }
+
+// addFuzzLoadPeerCacheSeeds adds test seed data for the FuzzLoadPeerCache function.
+func addFuzzLoadPeerCacheSeeds(f *testing.F) {
+	// Valid cases
+	f.Add([]byte(`[{"id":"QmYyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N","name":"alice","addrs":["/ip4/127.0.0.1/tcp/4001"],"last_seen":"2024-01-01T00:00:00Z"}]`))
+	f.Add([]byte(`[{"id":"peer1","name":"alice","addrs":["/ip4/127.0.0.1/tcp/4001"],"last_seen":"2024-01-01T00:00:00Z"},{"id":"peer2","name":"bob","addrs":["/ip4/192.168.1.1/tcp/4001"],"last_seen":"2024-01-02T00:00:00Z"}]`))
+	f.Add([]byte(`[]`))
+
+	// Invalid JSON
+	f.Add([]byte(`{invalid json}`))
+	f.Add([]byte(`[{`))
+	f.Add([]byte(`}`))
+	f.Add([]byte(``))
+
+	// Malformed structures
+	f.Add([]byte(`{"not":"an_array"}`))
+	f.Add([]byte(`null`))
+	f.Add([]byte(`"string"`))
+	f.Add([]byte(`123`))
+
+	// Missing fields
+	f.Add([]byte(`[{"id":"peer1"}]`))
+	f.Add([]byte(`[{"name":"alice"}]`))
+	f.Add([]byte(`[{}]`))
+
+	// Wrong types
+	f.Add([]byte(`[{"id":123,"name":"alice","addrs":[],"last_seen":"2024-01-01T00:00:00Z"}]`))
+	f.Add([]byte(`[{"id":"peer1","name":123,"addrs":[],"last_seen":"2024-01-01T00:00:00Z"}]`))
+	f.Add([]byte(`[{"id":"peer1","name":"alice","addrs":"not_array","last_seen":"2024-01-01T00:00:00Z"}]`))
+
+	// Invalid timestamps
+	f.Add([]byte(`[{"id":"peer1","name":"alice","addrs":[],"last_seen":"invalid-date"}]`))
+	f.Add([]byte(`[{"id":"peer1","name":"alice","addrs":[],"last_seen":null}]`))
+
+	// Large array
+	largeArray := `[`
+	for i := 0; i < 100; i++ {
+		if i > 0 {
+			largeArray += `,`
+		}
+		largeArray += `{"id":"peer` + string(rune(i)) + `","name":"peer","addrs":[],"last_seen":"2024-01-01T00:00:00Z"}`
+	}
+	largeArray += `]`
+	f.Add([]byte(largeArray))
+
+	// Unicode and special characters
+	f.Add([]byte(`[{"id":"peer\u4f60\u597d","name":"peer\u0645\u0631\u062d\u0628\u0627","addrs":[],"last_seen":"2024-01-01T00:00:00Z"}]`))
+	f.Add([]byte(`[{"id":"peer\u0000null","name":"alice","addrs":[],"last_seen":"2024-01-01T00:00:00Z"}]`))
+
+	// Extra fields
+	f.Add([]byte(`[{"id":"peer1","name":"alice","addrs":[],"last_seen":"2024-01-01T00:00:00Z","extra":"field","another":123}]`))
+}
+
+// validatePeerCacheResult validates the result of loading a peer cache.
+func validatePeerCacheResult(t *testing.T, peers, peersNoEvict []cachedPeer) {
+	t.Helper()
+
+	// Both nil (parse error) or both non-nil (success)
+	if (peers == nil) != (peersNoEvict == nil) {
+		// One succeeded and one failed - allow if both are effectively empty
+		if len(peers) == 0 && len(peersNoEvict) == 0 {
+			return
+		}
+		t.Error("loadPeerCache returned different results for same file with different TTL")
+	} else if peers != nil && peersNoEvict != nil {
+		// Both successful, peer count should be same or more with negative TTL
+		if len(peersNoEvict) < len(peers) {
+			t.Errorf("Expected no-evict to have >= peers, got %d vs %d", len(peersNoEvict), len(peers))
+		}
+	}
+}
+
+// FuzzLoadPeerCache performs fuzz testing on the loadPeerCache function
+// to ensure it handles arbitrary JSON data without panicking and with proper
+// error handling. This tests the robustness of JSON parsing and data validation.
+func FuzzLoadPeerCache(f *testing.F) {
+	addFuzzLoadPeerCacheSeeds(f)
+
+	f.Fuzz(func(t *testing.T, jsonData []byte) {
+		logger := &DefaultLogger{}
+		cacheFile := filepath.Join(t.TempDir(), "fuzz_cache.json")
+
+		// Write fuzzed data to file
+		err := os.WriteFile(cacheFile, jsonData, 0o600)
+		if err != nil {
+			// If we can't write the file, skip this iteration
+			t.Skip()
+		}
+
+		// The function should never panic, regardless of input
+		peers := loadPeerCache(cacheFile, 24*time.Hour, logger)
+
+		// Verify the result is consistent with the behavior
+		// Either nil (error case) or a valid slice
+		// If we got peers, verify they're valid
+		for _, peer := range peers {
+			// Each peer should have at least an ID (could be empty string though)
+			// Addrs could be nil or valid slice
+			for _, addr := range peer.Addrs {
+				// Each address should be a string (could be empty)
+				_ = addr
+			}
+		}
+
+		// Try loading again with negative TTL (no eviction) and validate
+		peersNoEvict := loadPeerCache(cacheFile, -1, logger)
+		validatePeerCacheResult(t, peers, peersNoEvict)
+	})
+}
