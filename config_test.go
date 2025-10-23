@@ -44,8 +44,9 @@ func TestDefaultLoggerDebugf(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			// Capture log output
 			var buf bytes.Buffer
+			oldOutput := log.Writer()
 			log.SetOutput(&buf)
-			defer log.SetOutput(nil)
+			defer log.SetOutput(oldOutput)
 
 			logger := &DefaultLogger{}
 			logger.Debugf(tt.format, tt.args...)
@@ -91,8 +92,9 @@ func TestDefaultLoggerInfof(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var buf bytes.Buffer
+			oldOutput := log.Writer()
 			log.SetOutput(&buf)
-			defer log.SetOutput(nil)
+			defer log.SetOutput(oldOutput)
 
 			logger := &DefaultLogger{}
 			logger.Infof(tt.format, tt.args...)
@@ -138,8 +140,9 @@ func TestDefaultLoggerWarnf(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var buf bytes.Buffer
+			oldOutput := log.Writer()
 			log.SetOutput(&buf)
-			defer log.SetOutput(nil)
+			defer log.SetOutput(oldOutput)
 
 			logger := &DefaultLogger{}
 			logger.Warnf(tt.format, tt.args...)
@@ -185,8 +188,9 @@ func TestDefaultLoggerErrorf(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var buf bytes.Buffer
+			oldOutput := log.Writer()
 			log.SetOutput(&buf)
-			defer log.SetOutput(nil)
+			defer log.SetOutput(oldOutput)
 
 			logger := &DefaultLogger{}
 			logger.Errorf(tt.format, tt.args...)
@@ -201,8 +205,9 @@ func TestDefaultLoggerErrorf(t *testing.T) {
 func TestDefaultLoggerAllLevels(t *testing.T) {
 	// This test verifies all log levels work together and produce distinct output
 	var buf bytes.Buffer
+	oldOutput := log.Writer()
 	log.SetOutput(&buf)
-	defer log.SetOutput(nil)
+	defer log.SetOutput(oldOutput)
 
 	logger := &DefaultLogger{}
 
