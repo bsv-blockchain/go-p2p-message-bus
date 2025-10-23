@@ -1,3 +1,4 @@
+// Package main provides an example P2P messaging application with topic subscription and broadcasting.
 package main
 
 import (
@@ -21,7 +22,7 @@ func main() {
 	topics := flag.String("topics", "broadcast_p2p_poc", "Comma-separated list of topics to subscribe to")
 	port := flag.Int("port", 0, "port to listen on (0 for random)")
 	noBroadcast := flag.Bool("no-broadcast", false, "Disable message broadcasting")
-	prettyJson := flag.Bool("pretty-json", false, "Pretty print JSON messages")
+	prettyJSON := flag.Bool("pretty-json", false, "Pretty print JSON messages")
 	relays := flag.String("relays", "", "Comma-separated list of relay peer multiaddrs (e.g., /ip4/1.2.3.4/tcp/4001/p2p/PeerID)")
 
 	flag.Parse()
@@ -37,42 +38,14 @@ func main() {
 	defer cancel()
 
 	// Get or generate private key
-	keyHex := *privateKey
-	if keyHex == "" {
-		// Try to load from environment variable
-		keyHex = os.Getenv("P2P_PRIVATE_KEY")
-	}
-
-	var privKey crypto.PrivKey
-	var err error
-
-	if keyHex == "" {
-		// Generate a new key
-		privKey, err = p2p.GeneratePrivateKey()
-		if err != nil {
-			logger.Errorf("Failed to generate private key: %v", err)
-			return
-		}
-
-		keyHex, _ = p2p.PrivateKeyToHex(privKey)
-		logger.Infof("Generated new private key: %s\n", keyHex)
-		logger.Infof("Save this key and use it next time with --key flag or P2P_PRIVATE_KEY env var")
-	} else {
-		// Load key from hex
-		privKey, err = p2p.PrivateKeyFromHex(keyHex)
-		if err != nil {
-			logger.Errorf("Failed to load private key: %v", err)
-			return
-		}
+	privKey, err := getOrGeneratePrivateKey(*privateKey, logger)
+	if err != nil {
+		logger.Errorf("Failed to get private key: %v", err)
+		return
 	}
 
 	// Parse relay peers list
-	var relayPeers []string
-	if *relays != "" {
-		for _, r := range strings.Split(*relays, ",") {
-			relayPeers = append(relayPeers, strings.TrimSpace(r))
-		}
-	}
+	relayPeers := parseRelayPeers(*relays)
 
 	// Create P2P client
 	client, err := p2p.NewClient(p2p.Config{
@@ -88,104 +61,26 @@ func main() {
 		return
 	}
 
-	defer client.Close()
-
-	// Parse topics list
-	topicList := strings.Split(*topics, ",")
-	for i, t := range topicList {
-		topicList[i] = strings.TrimSpace(t)
-	}
-
-	// Subscribe to all topics and merge messages into single channel
-	allMsgChan := make(chan p2p.Message, 100)
-
-	for _, topic := range topicList {
-		msgChan := client.Subscribe(topic)
-		logger.Infof("Subscribed to topic: %s", topic)
-
-		go func(ch <-chan p2p.Message) {
-			for msg := range ch {
-				allMsgChan <- msg
-			}
-		}(msgChan)
-	}
-
-	// Start message receiver
-	go func() {
-		for msg := range allMsgChan {
-			var data string
-
-			if *prettyJson {
-				// Try to unmarshal and re-marshal for pretty printing
-				var jsonObj interface{}
-				if err := json.Unmarshal(msg.Data, &jsonObj); err == nil {
-					if jsonBytes, err := json.MarshalIndent(jsonObj, "", "  "); err == nil {
-						data = string(jsonBytes)
-					} else {
-						data = string(msg.Data)
-					}
-				} else {
-					data = string(msg.Data)
-				}
-			} else {
-				data = string(msg.Data)
-			}
-
-			logger.Infof("[%-52s] %s: (%s)\n%s", msg.FromID, msg.From, msg.Topic, data)
+	defer func() {
+		if err := client.Close(); err != nil {
+			logger.Errorf("Failed to close client: %v", err)
 		}
 	}()
+
+	// Parse and subscribe to topics
+	topicList := parseTopics(*topics)
+	allMsgChan := subscribeToTopics(client, topicList, logger)
+
+	// Start message receiver
+	go receiveMessages(allMsgChan, *prettyJSON, logger)
 
 	// Start message broadcaster (publishes to all topics)
 	if !*noBroadcast {
-		go func() {
-			counter := 0
-			ticker := time.NewTicker(1 * time.Second)
-			defer ticker.Stop()
-
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-					counter++
-					data := fmt.Sprintf("Message #%d", counter)
-
-					for _, topic := range topicList {
-						if err := client.Publish(ctx, topic, []byte(data)); err != nil {
-							return
-						}
-					}
-					logger.Infof("[%-52s] %s: %s\n", "local", *name, data)
-				}
-			}
-		}()
+		go broadcastMessages(ctx, client, topicList, *name, logger)
 	}
 
 	// Periodically display peer information
-	go func() {
-		ticker := time.NewTicker(10 * time.Second)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				peers := client.GetPeers()
-				if len(peers) > 0 {
-					sb := strings.Builder{}
-					sb.WriteString(fmt.Sprintf("\n=== Connected Peers: %d ===\n", len(peers)))
-					for _, peer := range peers {
-						sb.WriteString(fmt.Sprintf("  - %s [%s]\n", peer.Name, peer.ID))
-						for _, addr := range peer.Addrs {
-							sb.WriteString(fmt.Sprintf("    %s\n", addr))
-						}
-					}
-					logger.Infof("%s", sb.String())
-				}
-			}
-		}
-	}()
+	go displayPeers(ctx, client, logger)
 
 	logger.Infof("P2P client started. Press Ctrl+C to exit")
 
@@ -196,4 +91,132 @@ func main() {
 
 	logger.Infof("\nShutting down...")
 	cancel()
+}
+
+// Helper functions
+
+func getOrGeneratePrivateKey(keyHex string, logger *p2p.DefaultLogger) (crypto.PrivKey, error) {
+	if keyHex == "" {
+		keyHex = os.Getenv("P2P_PRIVATE_KEY")
+	}
+
+	if keyHex == "" {
+		privKey, err := p2p.GeneratePrivateKey()
+		if err != nil {
+			return nil, err
+		}
+		newKeyHex, _ := p2p.PrivateKeyToHex(privKey)
+		logger.Infof("Generated new private key: %s\n", newKeyHex)
+		logger.Infof("Save this key and use it next time with --key flag or P2P_PRIVATE_KEY env var")
+		return privKey, nil
+	}
+
+	return p2p.PrivateKeyFromHex(keyHex)
+}
+
+func parseRelayPeers(relays string) []string {
+	if relays == "" {
+		return nil
+	}
+
+	parts := strings.Split(relays, ",")
+	relayPeers := make([]string, 0, len(parts))
+	for _, r := range parts {
+		relayPeers = append(relayPeers, strings.TrimSpace(r))
+	}
+	return relayPeers
+}
+
+func parseTopics(topics string) []string {
+	topicList := strings.Split(topics, ",")
+	for i, t := range topicList {
+		topicList[i] = strings.TrimSpace(t)
+	}
+	return topicList
+}
+
+func subscribeToTopics(client p2p.Client, topics []string, logger *p2p.DefaultLogger) chan p2p.Message {
+	allMsgChan := make(chan p2p.Message, 100)
+
+	for _, topic := range topics {
+		msgChan := client.Subscribe(topic)
+		logger.Infof("Subscribed to topic: %s", topic)
+
+		go func(ch <-chan p2p.Message) {
+			for msg := range ch {
+				allMsgChan <- msg
+			}
+		}(msgChan)
+	}
+
+	return allMsgChan
+}
+
+func receiveMessages(msgChan <-chan p2p.Message, prettyJSON bool, logger *p2p.DefaultLogger) {
+	for msg := range msgChan {
+		data := formatMessageData(msg.Data, prettyJSON)
+		logger.Infof("[%-52s] %s: (%s)\n%s", msg.FromID, msg.From, msg.Topic, data)
+	}
+}
+
+func formatMessageData(data []byte, prettyJSON bool) string {
+	if !prettyJSON {
+		return string(data)
+	}
+
+	var jsonObj interface{}
+	if err := json.Unmarshal(data, &jsonObj); err == nil {
+		if jsonBytes, err := json.MarshalIndent(jsonObj, "", "  "); err == nil {
+			return string(jsonBytes)
+		}
+	}
+	return string(data)
+}
+
+func broadcastMessages(ctx context.Context, client p2p.Client, topics []string, name string, logger *p2p.DefaultLogger) {
+	counter := 0
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			counter++
+			data := fmt.Sprintf("Message #%d", counter)
+
+			for _, topic := range topics {
+				if err := client.Publish(ctx, topic, []byte(data)); err != nil {
+					return
+				}
+			}
+			logger.Infof("[%-52s] %s: %s\n", "local", name, data)
+		}
+	}
+}
+
+func displayPeers(ctx context.Context, client p2p.Client, logger *p2p.DefaultLogger) {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			peers := client.GetPeers()
+			if len(peers) > 0 {
+				sb := strings.Builder{}
+				sb.WriteString(fmt.Sprintf("\n=== Connected Peers: %d ===\n", len(peers)))
+				for _, peer := range peers {
+					sb.WriteString(fmt.Sprintf("  - %s [%s]\n", peer.Name, peer.ID))
+					for _, addr := range peer.Addrs {
+						sb.WriteString(fmt.Sprintf("    %s\n", addr))
+					}
+				}
+				logger.Infof("%s", sb.String())
+			}
+		}
+	}
 }

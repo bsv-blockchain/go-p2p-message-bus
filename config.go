@@ -18,9 +18,16 @@ type logger interface {
 // DefaultLogger is a simple logger implementation using the standard log package.
 type DefaultLogger struct{}
 
+// Debugf logs a debug message with formatting.
 func (d *DefaultLogger) Debugf(format string, v ...any) { log.Printf("[DEBUG] "+format, v...) }
-func (d *DefaultLogger) Infof(format string, v ...any)  { log.Printf("[INFO] "+format, v...) }
-func (d *DefaultLogger) Warnf(format string, v ...any)  { log.Printf("[WARN] "+format, v...) }
+
+// Infof logs an info message with formatting.
+func (d *DefaultLogger) Infof(format string, v ...any) { log.Printf("[INFO] "+format, v...) }
+
+// Warnf logs a warning message with formatting.
+func (d *DefaultLogger) Warnf(format string, v ...any) { log.Printf("[WARN] "+format, v...) }
+
+// Errorf logs an error message with formatting.
 func (d *DefaultLogger) Errorf(format string, v ...any) { log.Printf("[ERROR] "+format, v...) }
 
 // Config contains the configuration options for creating a P2P client.

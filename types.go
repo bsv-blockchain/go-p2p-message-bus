@@ -8,8 +8,8 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 )
 
-// P2PClient defines the interface for a P2P messaging client.
-type P2PClient interface {
+// Client defines the interface for a P2P messaging client.
+type Client interface {
 	// Subscribe subscribes to a topic and returns a channel that will receive messages.
 	// The returned channel will be closed when the client is closed.
 	Subscribe(topic string) <-chan Message
@@ -53,12 +53,11 @@ type cachedPeer struct {
 }
 
 type peerTracker struct {
-	mu           sync.RWMutex
-	names        map[peer.ID]string
-	relayCount   int
-	isRelaying   map[string]bool
-	topicPeers   map[peer.ID]bool
-	lastSeen     map[peer.ID]time.Time
+	mu         sync.RWMutex
+	names      map[peer.ID]string
+	isRelaying map[string]bool
+	topicPeers map[peer.ID]bool
+	lastSeen   map[peer.ID]time.Time
 }
 
 func newPeerTracker() *peerTracker {
@@ -85,23 +84,6 @@ func (pt *peerTracker) getName(peerID peer.ID) string {
 	return "unknown"
 }
 
-func (pt *peerTracker) recordRelay(srcPeer, dstPeer peer.ID) {
-	pt.mu.Lock()
-	defer pt.mu.Unlock()
-
-	key := srcPeer.String() + "->" + dstPeer.String()
-	if !pt.isRelaying[key] {
-		pt.isRelaying[key] = true
-		pt.relayCount++
-	}
-}
-
-func (pt *peerTracker) getRelayCount() int {
-	pt.mu.RLock()
-	defer pt.mu.RUnlock()
-	return pt.relayCount
-}
-
 func (pt *peerTracker) recordMessageFrom(peerID peer.ID) {
 	pt.mu.Lock()
 	defer pt.mu.Unlock()
@@ -117,10 +99,4 @@ func (pt *peerTracker) getAllTopicPeers() []peer.ID {
 		peers = append(peers, peerID)
 	}
 	return peers
-}
-
-func (pt *peerTracker) getLastSeen(peerID peer.ID) time.Time {
-	pt.mu.RLock()
-	defer pt.mu.RUnlock()
-	return pt.lastSeen[peerID]
 }
