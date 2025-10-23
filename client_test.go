@@ -601,6 +601,8 @@ func (e *mockError) Error() string {
 
 func TestBuildHostOptionsWithAnnounceAddrs(t *testing.T) {
 	logger := &DefaultLogger{}
+	// noop cancel function for testing - buildHostOptions requires a cancel function
+	// but we don't need actual cancellation logic in this unit test
 	cancel := func() {}
 
 	tests := []struct {
@@ -725,133 +727,114 @@ func TestClientPeerCacheTTLCustom(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// FuzzMessageUnmarshal performs fuzz testing on the P2P message unmarshaling logic
-// to ensure it handles arbitrary JSON data without panicking. This tests the
-// robustness of message parsing from potentially malicious or corrupted peers.
-func FuzzMessageUnmarshal(f *testing.F) {
-	// Seed corpus with various P2P message formats
+// messageStruct represents the P2P message structure for testing
+type messageStruct struct {
+	Name string `json:"name"`
+	Data []byte `json:"data"`
+}
 
-	// 1. Valid message
-	f.Add([]byte(`{"name":"alice","data":"aGVsbG8="}`)) // "hello" in base64
-
-	// 2. Valid message with empty data
+// addMessageUnmarshalSeeds adds a comprehensive seed corpus for P2P message fuzz testing
+func addMessageUnmarshalSeeds(f *testing.F) {
+	// Valid messages
+	f.Add([]byte(`{"name":"alice","data":"aGVsbG8="}`))
 	f.Add([]byte(`{"name":"bob","data":""}`))
-
-	// 3. Valid message with null data
 	f.Add([]byte(`{"name":"charlie","data":null}`))
 
-	// 4. Missing name field
+	// Missing fields
 	f.Add([]byte(`{"data":"aGVsbG8="}`))
-
-	// 5. Missing data field
 	f.Add([]byte(`{"name":"alice"}`))
-
-	// 6. Empty JSON object
 	f.Add([]byte(`{}`))
 
-	// 7. Invalid JSON
+	// Invalid JSON
 	f.Add([]byte(`{invalid json`))
 	f.Add([]byte(`}`))
 	f.Add([]byte(`{"name":"alice","data":`))
 
-	// 8. Wrong data types
+	// Wrong data types
 	f.Add([]byte(`{"name":123,"data":"test"}`))
 	f.Add([]byte(`{"name":"alice","data":123}`))
 	f.Add([]byte(`{"name":"alice","data":{"nested":"object"}}`))
 	f.Add([]byte(`{"name":"alice","data":["array","of","items"]}`))
 
-	// 9. Not an object
+	// Not an object
 	f.Add([]byte(`[]`))
 	f.Add([]byte(`"string"`))
 	f.Add([]byte(`123`))
 	f.Add([]byte(`null`))
 	f.Add([]byte(`true`))
 
-	// 10. Extra fields
+	// Extra fields
 	f.Add([]byte(`{"name":"alice","data":"test","extra":"field","another":123}`))
 
-	// 11. Very long strings
+	// Very long strings
 	longName := `{"name":"` + string(make([]byte, 1000)) + `","data":"test"}`
 	f.Add([]byte(longName))
 
-	// 12. Unicode and special characters (using escape sequences to avoid gosmopolitan warning)
-	f.Add([]byte(`{"name":"peer\u4f60\u597d\u4e16\u754c","data":"test"}`)) // Chinese characters
+	// Unicode and special characters
+	f.Add([]byte(`{"name":"peer\u4f60\u597d\u4e16\u754c","data":"test"}`))
 	f.Add([]byte(`{"name":"alice\u0000null","data":"test"}`))
 	f.Add([]byte(`{"name":"alice","data":"data\u0000null"}`))
 
-	// 13. Escape sequences
+	// Escape sequences
 	f.Add([]byte(`{"name":"alice\"bob","data":"test"}`))
 	f.Add([]byte(`{"name":"alice\\bob","data":"test"}`))
 
-	// 14. Empty string
+	// Edge cases
 	f.Add([]byte(``))
-
-	// 15. Nested JSON in data field (as string)
 	f.Add([]byte(`{"name":"alice","data":"{\"nested\":\"json\"}"}`))
-
-	// 16. Binary data encoded as base64 (proper use case)
 	f.Add([]byte(`{"name":"alice","data":"SGVsbG8gV29ybGQhIFRoaXMgaXMgYSB0ZXN0IG1lc3NhZ2Uu"}`))
+}
+
+// validateMessageRoundTrip verifies that message data is preserved through marshal/unmarshal cycle
+func validateMessageRoundTrip(t *testing.T, m, m2 messageStruct) {
+	if m.Name != m2.Name {
+		t.Errorf("Name changed after round-trip: %q -> %q", m.Name, m2.Name)
+	}
+
+	if len(m.Data) != len(m2.Data) {
+		t.Errorf("Data length changed after round-trip: %d -> %d", len(m.Data), len(m2.Data))
+		return
+	}
+
+	for i := range m.Data {
+		if m.Data[i] != m2.Data[i] {
+			t.Errorf("Data byte at index %d changed after round-trip: %d -> %d", i, m.Data[i], m2.Data[i])
+			break
+		}
+	}
+}
+
+// FuzzMessageUnmarshal performs fuzz testing on the P2P message unmarshaling logic
+// to ensure it handles arbitrary JSON data without panicking. This tests the
+// robustness of message parsing from potentially malicious or corrupted peers.
+func FuzzMessageUnmarshal(f *testing.F) {
+	addMessageUnmarshalSeeds(f)
 
 	f.Fuzz(func(t *testing.T, jsonData []byte) {
-		// Simulate the message unmarshaling logic from client.go:616-623
-		var m struct {
-			Name string `json:"name"`
-			Data []byte `json:"data"`
+		var m messageStruct
+
+		err := json.Unmarshal(jsonData, &m)
+		if err != nil {
+			return // Invalid JSON is expected and handled gracefully
 		}
 
-		// The function should never panic, regardless of input
-		err := json.Unmarshal(jsonData, &m)
-		// Verify behavior is consistent
+		remarshaled, err := json.Marshal(m)
 		if err != nil {
-			// Error is expected for invalid JSON - the client code logs this error and continues
-			// We just verified no panic occurred, which is the main goal
+			t.Errorf("Failed to re-marshal successfully unmarshaled message: %v", err)
 			return
 		}
 
-		// Name should be a string (could be empty)
-		_ = m.Name
-
-		// Data should be a byte slice (could be nil or empty)
-		if m.Data != nil {
-			// Data exists, verify it's a valid byte slice
-			_ = len(m.Data)
-		}
-
-		// Test that we can re-marshal the data
-		remarshaled, marshalErr := json.Marshal(m)
-		if marshalErr != nil {
-			t.Errorf("Failed to re-marshal successfully unmarshaled message: %v", marshalErr)
-		}
-
-		// Re-marshaled data should be valid JSON
 		if len(remarshaled) == 0 {
 			t.Error("Re-marshaled data is empty")
+			return
 		}
 
-		// Test that we can unmarshal the re-marshaled data
-		var m2 struct {
-			Name string `json:"name"`
-			Data []byte `json:"data"`
-		}
-		if unmarshalErr := json.Unmarshal(remarshaled, &m2); unmarshalErr != nil {
-			t.Errorf("Failed to unmarshal re-marshaled data: %v", unmarshalErr)
+		var m2 messageStruct
+		if err := json.Unmarshal(remarshaled, &m2); err != nil {
+			t.Errorf("Failed to unmarshal re-marshaled data: %v", err)
+			return
 		}
 
-		// Round-trip should preserve the data
-		if m.Name != m2.Name {
-			t.Errorf("Name changed after round-trip: %q -> %q", m.Name, m2.Name)
-		}
-
-		// For data, compare lengths and content
-		if len(m.Data) != len(m2.Data) {
-			t.Errorf("Data length changed after round-trip: %d -> %d", len(m.Data), len(m2.Data))
-		} else {
-			for i := range m.Data {
-				if m.Data[i] != m2.Data[i] {
-					t.Errorf("Data byte at index %d changed after round-trip: %d -> %d", i, m.Data[i], m2.Data[i])
-					break
-				}
-			}
-		}
+		validateMessageRoundTrip(t, m, m2)
 	})
 }
