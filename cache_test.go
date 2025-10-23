@@ -220,7 +220,7 @@ func TestSavePeerCacheInvalidPath(_ *testing.T) {
 		{
 			ID:       "QmYyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N",
 			Name:     "peer1",
-			Addrs:    []string{"/ip4/127.0.0.1/tcp/4001"},
+			Addrs:    []string{testAddrLocalhost},
 			LastSeen: time.Now(),
 		},
 	}
@@ -478,7 +478,7 @@ func TestSavePeerCacheFilePermissions(t *testing.T) {
 		{
 			ID:       "QmYyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N",
 			Name:     "peer1",
-			Addrs:    []string{"/ip4/127.0.0.1/tcp/4001"},
+			Addrs:    []string{testAddrLocalhost},
 			LastSeen: time.Now(),
 		},
 	}
@@ -503,7 +503,7 @@ func TestLoadAndSavePeerCacheRoundTrip(t *testing.T) {
 		{
 			ID:       "QmYyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N",
 			Name:     "alice",
-			Addrs:    []string{"/ip4/127.0.0.1/tcp/4001"},
+			Addrs:    []string{testAddrLocalhost},
 			LastSeen: now,
 		},
 		{
