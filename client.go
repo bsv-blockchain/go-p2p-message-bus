@@ -783,6 +783,18 @@ func savePeerCache(peers []cachedPeer, cacheFile string, logger logger) {
 	}
 }
 
+func parseMultiaddrs(addrs []string) []multiaddr.Multiaddr {
+	maddrs := make([]multiaddr.Multiaddr, 0, len(addrs))
+	for _, addrStr := range addrs {
+		maddr, err := multiaddr.NewMultiaddr(addrStr)
+		if err != nil {
+			continue
+		}
+		maddrs = append(maddrs, maddr)
+	}
+	return maddrs
+}
+
 func connectToCachedPeers(ctx context.Context, h host.Host, cachedPeers []cachedPeer, logger logger) {
 	for _, cp := range cachedPeers {
 		peerID, err := peer.Decode(cp.ID)
@@ -795,15 +807,7 @@ func connectToCachedPeers(ctx context.Context, h host.Host, cachedPeers []cached
 			continue
 		}
 
-		var maddrs []multiaddr.Multiaddr
-		for _, addrStr := range cp.Addrs {
-			maddr, err := multiaddr.NewMultiaddr(addrStr)
-			if err != nil {
-				continue
-			}
-			maddrs = append(maddrs, maddr)
-		}
-
+		maddrs := parseMultiaddrs(cp.Addrs)
 		if len(maddrs) == 0 {
 			continue
 		}
