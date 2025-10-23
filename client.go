@@ -750,7 +750,12 @@ func evictStalePeers(peers []cachedPeer, ttl time.Duration, logger logger) []cac
 
 	for _, p := range peers {
 		if p.LastSeen.IsZero() {
-			logger.Debugf("Peer %s has no LastSeen timestamp, keeping for now", p.ID[:16])
+			// Safely truncate peer ID for logging
+			peerID := p.ID
+			if len(peerID) > 16 {
+				peerID = peerID[:16]
+			}
+			logger.Debugf("Peer %s has no LastSeen timestamp, keeping for now", peerID)
 			validPeers = append(validPeers, p)
 		} else if p.LastSeen.After(threshold) {
 			validPeers = append(validPeers, p)
