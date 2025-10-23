@@ -267,13 +267,9 @@ func TestPrivateKeyFromHexWithRealWorldExample(t *testing.T) {
 	assert.Equal(t, keyBytes, restoredBytes)
 }
 
-// FuzzPrivateKeyFromHex performs fuzz testing on the PrivateKeyFromHex function
-// to ensure it handles arbitrary hex strings without panicking and with proper
-// error handling. This tests the robustness of hex decoding and key unmarshaling.
-func FuzzPrivateKeyFromHex(f *testing.F) {
-	// Seed corpus with various test cases
-
-	// 1. Valid key (generated)
+// addPrivateKeyFromHexSeeds adds a comprehensive seed corpus for private key hex fuzzing
+func addPrivateKeyFromHexSeeds(f *testing.F) {
+	// Valid key (generated)
 	validKey, err := GeneratePrivateKey()
 	if err == nil {
 		validHex, err := PrivateKeyToHex(validKey)
@@ -282,33 +278,56 @@ func FuzzPrivateKeyFromHex(f *testing.F) {
 		}
 	}
 
-	// 2. Empty string
+	// Empty and invalid
 	f.Add("")
-
-	// 3. Invalid hex characters
 	f.Add("zzz123notvalid")
 	f.Add("ghijklmnop")
 
-	// 4. Odd length hex strings
+	// Odd length hex strings
 	f.Add("a")
 	f.Add("abc")
 	f.Add("12345")
 
-	// 5. Valid hex but wrong length/format
+	// Valid hex but wrong length/format
 	f.Add("deadbeef")
 	f.Add("00")
 	f.Add("0000000000000000")
 
-	// 6. Very long strings
+	// Very long strings
 	f.Add("00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000")
 
-	// 7. Special characters and edge cases
-	f.Add("0x123456")     // Hex prefix
-	f.Add("  deadbeef  ") // Whitespace
-	f.Add("\n\t")         // Control characters
+	// Special characters and edge cases
+	f.Add("0x123456")
+	f.Add("  deadbeef  ")
+	f.Add("\n\t")
+}
+
+// validateRestoredPrivateKey validates that a restored private key is valid
+func validateRestoredPrivateKey(t *testing.T, key crypto.PrivKey) {
+	t.Helper()
+
+	if key == nil {
+		t.Error("PrivateKeyFromHex returned nil key without error")
+		return
+	}
+
+	if key.Type() != crypto.Ed25519 {
+		t.Errorf("Expected Ed25519 key type, got %v", key.Type())
+	}
+
+	pubKey := key.GetPublic()
+	if pubKey == nil {
+		t.Error("GetPublic() returned nil for valid key")
+	}
+}
+
+// FuzzPrivateKeyFromHex performs fuzz testing on the PrivateKeyFromHex function
+// to ensure it handles arbitrary hex strings without panicking and with proper
+// error handling. This tests the robustness of hex decoding and key unmarshaling.
+func FuzzPrivateKeyFromHex(f *testing.F) {
+	addPrivateKeyFromHexSeeds(f)
 
 	f.Fuzz(func(t *testing.T, hexInput string) {
-		// The function should never panic, regardless of input
 		key, err := PrivateKeyFromHex(hexInput)
 		if err != nil {
 			// Error is expected for invalid input - ensure key is nil
@@ -318,22 +337,7 @@ func FuzzPrivateKeyFromHex(f *testing.F) {
 			return
 		}
 
-		// Success case - ensure key is valid
-		if key == nil {
-			t.Error("PrivateKeyFromHex returned nil key without error")
-			return
-		}
-
-		// Verify the key has the expected type
-		if key.Type() != crypto.Ed25519 {
-			t.Errorf("Expected Ed25519 key type, got %v", key.Type())
-		}
-
-		// Verify we can get the public key
-		pubKey := key.GetPublic()
-		if pubKey == nil {
-			t.Error("GetPublic() returned nil for valid key")
-		}
+		validateRestoredPrivateKey(t, key)
 	})
 }
 
