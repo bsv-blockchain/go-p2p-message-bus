@@ -603,7 +603,9 @@ func TestBuildHostOptionsWithAnnounceAddrs(t *testing.T) {
 	logger := &DefaultLogger{}
 	// noop cancel function for testing - buildHostOptions requires a cancel function
 	// but we don't need actual cancellation logic in this unit test
-	cancel := func() {}
+	cancel := func() {
+		// Intentionally empty - this is a test fixture that satisfies the function signature
+	}
 
 	tests := []struct {
 		name          string

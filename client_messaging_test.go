@@ -9,6 +9,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const testData = "test data"
+
 func TestClientSubscribeMultipleTopicsConcurrently(t *testing.T) {
 	privKey, err := GeneratePrivateKey()
 	require.NoError(t, err)
@@ -66,7 +68,7 @@ func TestClientPublishToUnsubscribedTopic(t *testing.T) {
 	ctx := context.Background()
 
 	// Publish to a topic we haven't subscribed to
-	err = cl.Publish(ctx, "new-topic", []byte("test data"))
+	err = cl.Publish(ctx, "new-topic", []byte(testData))
 	require.NoError(t, err)
 }
 
@@ -274,14 +276,14 @@ func TestMessageStructFields(t *testing.T) {
 		Topic:     "test-topic",
 		From:      "test-peer",
 		FromID:    "12D3KooTest",
-		Data:      []byte("test data"),
+		Data:      []byte(testData),
 		Timestamp: time.Now(),
 	}
 
 	assert.Equal(t, "test-topic", msg.Topic)
 	assert.Equal(t, "test-peer", msg.From)
 	assert.Equal(t, "12D3KooTest", msg.FromID)
-	assert.Equal(t, []byte("test data"), msg.Data)
+	assert.Equal(t, []byte(testData), msg.Data)
 	assert.False(t, msg.Timestamp.IsZero())
 }
 

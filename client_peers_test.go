@@ -32,7 +32,7 @@ func TestClientGetPeersWithTopicPeers(t *testing.T) {
 	assert.Empty(t, peers)
 
 	// Subscribe to a topic
-	_ = client1.Subscribe("test-topic")
+	_ = client1.Subscribe(testTopicName)
 
 	// Give subscription time to initialize
 	time.Sleep(100 * time.Millisecond)
@@ -110,7 +110,7 @@ func TestClientSavePeerCacheEnabled(t *testing.T) {
 	c := cl.(*client)
 
 	// Subscribe to a topic to initialize topics map
-	_ = c.Subscribe("test-topic")
+	_ = c.Subscribe(testTopicName)
 	time.Sleep(100 * time.Millisecond)
 
 	// Call savePeerCache
@@ -143,7 +143,7 @@ func TestClientSavePeerCacheWithInvalidPath(t *testing.T) {
 	c := cl.(*client)
 
 	// Subscribe to a topic
-	_ = c.Subscribe("test-topic")
+	_ = c.Subscribe(testTopicName)
 	time.Sleep(50 * time.Millisecond)
 
 	// Should not panic even with invalid path
@@ -231,7 +231,7 @@ func TestClientSavePeerCacheMergesExistingData(t *testing.T) {
 	c := cl.(*client)
 
 	// Subscribe to trigger topic creation
-	_ = c.Subscribe("test-topic")
+	_ = c.Subscribe(testTopicName)
 	time.Sleep(50 * time.Millisecond)
 
 	// Save cache
