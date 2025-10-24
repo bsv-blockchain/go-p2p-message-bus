@@ -9,6 +9,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const testRelayPeerMultiaddr = "/ip4/127.0.0.1/tcp/4001/p2p/QmYyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N"
+
 func TestNewClientWithCustomRelayPeers(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -18,7 +20,7 @@ func TestNewClientWithCustomRelayPeers(t *testing.T) {
 		{
 			name: "single relay peer",
 			relayPeers: []string{
-				"/ip4/127.0.0.1/tcp/4001/p2p/QmYyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N",
+				testRelayPeerMultiaddr,
 			},
 			wantErr: false,
 		},
@@ -66,7 +68,7 @@ func TestConfigureRelayPeersWithValidPeers(t *testing.T) {
 
 	// Valid relay peer
 	relayPeersConfig := []string{
-		"/ip4/127.0.0.1/tcp/4001/p2p/QmYyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N",
+		testRelayPeerMultiaddr,
 	}
 
 	relayPeers := configureRelayPeers(relayPeersConfig, bootstrapPeers, logger)
@@ -80,7 +82,7 @@ func TestConfigureRelayPeersWithMixedValidity(t *testing.T) {
 
 	// Mix of valid and invalid
 	relayPeersConfig := []string{
-		"/ip4/127.0.0.1/tcp/4001/p2p/QmYyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N",
+		testRelayPeerMultiaddr,
 		"invalid-peer",
 	}
 

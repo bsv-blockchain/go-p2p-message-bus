@@ -12,6 +12,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const testLocalMultiaddr = "/ip4/127.0.0.1/tcp/4001"
+
 func TestParseMultiaddrs(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -21,7 +23,7 @@ func TestParseMultiaddrs(t *testing.T) {
 	}{
 		{
 			name:          "valid multiaddrs",
-			addrs:         []string{"/ip4/127.0.0.1/tcp/4001", "/ip6/::1/tcp/4001"},
+			addrs:         []string{testLocalMultiaddr, "/ip6/::1/tcp/4001"},
 			expectedCount: 2,
 			description:   "valid multiaddrs should be parsed successfully",
 		},
@@ -51,7 +53,7 @@ func TestParseMultiaddrs(t *testing.T) {
 		},
 		{
 			name:          "mixed valid and invalid",
-			addrs:         []string{"/ip4/127.0.0.1/tcp/4001", "invalid", "/ip6/::1/tcp/4001"},
+			addrs:         []string{testLocalMultiaddr, "invalid", "/ip6/::1/tcp/4001"},
 			expectedCount: 2,
 			description:   "only valid multiaddrs should be included",
 		},
@@ -105,7 +107,7 @@ func TestConnectToCachedPeers(t *testing.T) {
 					{
 						ID:    "invalid-peer-id",
 						Name:  "test",
-						Addrs: []string{"/ip4/127.0.0.1/tcp/4001"},
+						Addrs: []string{testLocalMultiaddr},
 					},
 				}
 			},

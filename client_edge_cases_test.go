@@ -9,6 +9,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const testMessagingTopic = "messaging-test"
+
 func TestClientTwoWayMessaging(t *testing.T) {
 	// Create two clients
 	privKey1, err := GeneratePrivateKey()
@@ -42,8 +44,8 @@ func TestClientTwoWayMessaging(t *testing.T) {
 	}()
 
 	// Subscribe to same topic
-	msgChan1 := cl1.Subscribe("messaging-test")
-	msgChan2 := cl2.Subscribe("messaging-test")
+	msgChan1 := cl1.Subscribe(testMessagingTopic)
+	msgChan2 := cl2.Subscribe(testMessagingTopic)
 
 	// Give time for subscriptions and discovery
 	time.Sleep(3 * time.Second)
@@ -51,7 +53,7 @@ func TestClientTwoWayMessaging(t *testing.T) {
 	// Publish from client1
 	ctx := context.Background()
 	testData := []byte("Hello from client1")
-	err = cl1.Publish(ctx, "messaging-test", testData)
+	err = cl1.Publish(ctx, testMessagingTopic, testData)
 	require.NoError(t, err)
 
 	// Try to receive on both clients (one should get it, the sender filters itself)
