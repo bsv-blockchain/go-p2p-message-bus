@@ -10,313 +10,147 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestDHTModeDefault verifies that the default DHT mode is server
-func TestDHTModeDefault(t *testing.T) {
-	privKey, err := GeneratePrivateKey()
-	require.NoError(t, err)
-
-	// Capture log output to verify mode selection
-	var buf bytes.Buffer
-	oldOutput := log.Writer()
-	log.SetOutput(&buf)
-	defer log.SetOutput(oldOutput)
-
-	config := Config{
-		Name:       "test-dht-default",
-		PrivateKey: privKey,
-		// DHTMode not specified - should default to server
-	}
-
-	client, err := NewClient(config)
-	require.NoError(t, err)
-	require.NotNil(t, client)
-	defer client.Close()
-
-	// Verify server mode was selected
-	output := buf.String()
-	assert.Contains(t, output, "DHT mode: server")
-	assert.Contains(t, output, "will advertise and store provider records")
+// testClientConfig is a helper to create a test client with log capture
+type testClientConfig struct {
+	name            string
+	dhtMode         string
+	cleanupInterval time.Duration
 }
 
-// TestDHTModeServer verifies explicit server mode configuration
-func TestDHTModeServer(t *testing.T) {
-	privKey, err := GeneratePrivateKey()
-	require.NoError(t, err)
+// createTestClient is a helper function that reduces duplication in client creation and log setup
+func createTestClient(t *testing.T, cfg testClientConfig) (Client, string) {
+	t.Helper()
 
+	privKey, err := GeneratePrivateKey()
+	require.NoError(t, err, "failed to generate private key")
+
+	// Capture log output
 	var buf bytes.Buffer
 	oldOutput := log.Writer()
 	log.SetOutput(&buf)
-	defer log.SetOutput(oldOutput)
+	t.Cleanup(func() { log.SetOutput(oldOutput) })
 
 	config := Config{
-		Name:       "test-dht-server",
-		PrivateKey: privKey,
-		DHTMode:    "server",
-	}
-
-	client, err := NewClient(config)
-	require.NoError(t, err)
-	require.NotNil(t, client)
-	defer client.Close()
-
-	// Verify server mode was selected
-	output := buf.String()
-	assert.Contains(t, output, "DHT mode: server")
-}
-
-// TestDHTModeClient verifies client mode configuration
-func TestDHTModeClient(t *testing.T) {
-	privKey, err := GeneratePrivateKey()
-	require.NoError(t, err)
-
-	var buf bytes.Buffer
-	oldOutput := log.Writer()
-	log.SetOutput(&buf)
-	defer log.SetOutput(oldOutput)
-
-	config := Config{
-		Name:       "test-dht-client",
-		PrivateKey: privKey,
-		DHTMode:    "client",
-	}
-
-	client, err := NewClient(config)
-	require.NoError(t, err)
-	require.NotNil(t, client)
-	defer client.Close()
-
-	// Verify client mode was selected
-	output := buf.String()
-	assert.Contains(t, output, "DHT mode: client")
-	assert.Contains(t, output, "query-only, no provider storage")
-}
-
-// TestDHTCleanupIntervalDefault verifies default cleanup interval is not logged when not specified
-func TestDHTCleanupIntervalDefault(t *testing.T) {
-	privKey, err := GeneratePrivateKey()
-	require.NoError(t, err)
-
-	var buf bytes.Buffer
-	oldOutput := log.Writer()
-	log.SetOutput(&buf)
-	defer log.SetOutput(oldOutput)
-
-	config := Config{
-		Name:       "test-cleanup-default",
-		PrivateKey: privKey,
-		DHTMode:    "server",
-		// DHTCleanupInterval not specified - should use libp2p default
-	}
-
-	client, err := NewClient(config)
-	require.NoError(t, err)
-	require.NotNil(t, client)
-	defer client.Close()
-
-	// Verify cleanup interval configuration is NOT logged (uses libp2p default)
-	output := buf.String()
-	assert.NotContains(t, output, "Configuring DHT cleanup interval")
-}
-
-// TestDHTCleanupIntervalCustom verifies custom cleanup interval configuration
-func TestDHTCleanupIntervalCustom(t *testing.T) {
-	privKey, err := GeneratePrivateKey()
-	require.NoError(t, err)
-
-	var buf bytes.Buffer
-	oldOutput := log.Writer()
-	log.SetOutput(&buf)
-	defer log.SetOutput(oldOutput)
-
-	customInterval := 6 * time.Hour
-	config := Config{
-		Name:               "test-cleanup-custom",
+		Name:               cfg.name,
 		PrivateKey:         privKey,
-		DHTMode:            "server",
-		DHTCleanupInterval: customInterval,
+		DHTMode:            cfg.dhtMode,
+		DHTCleanupInterval: cfg.cleanupInterval,
 	}
 
 	client, err := NewClient(config)
-	require.NoError(t, err)
-	require.NotNil(t, client)
-	defer client.Close()
+	require.NoError(t, err, "failed to create client")
+	require.NotNil(t, client, "client should not be nil")
+	t.Cleanup(func() { client.Close() })
 
-	// Verify cleanup interval configuration was logged
-	output := buf.String()
-	assert.Contains(t, output, "Configuring DHT cleanup interval: 6h0m0s")
+	return client, buf.String()
 }
 
-// TestDHTCleanupIntervalIgnoredInClientMode verifies cleanup interval is ignored in client mode
-func TestDHTCleanupIntervalIgnoredInClientMode(t *testing.T) {
-	privKey, err := GeneratePrivateKey()
-	require.NoError(t, err)
-
-	var buf bytes.Buffer
-	oldOutput := log.Writer()
-	log.SetOutput(&buf)
-	defer log.SetOutput(oldOutput)
-
-	config := Config{
-		Name:               "test-cleanup-client-mode",
-		PrivateKey:         privKey,
-		DHTMode:            "client",
-		DHTCleanupInterval: 24 * time.Hour, // Should be ignored
-	}
-
-	client, err := NewClient(config)
-	require.NoError(t, err)
-	require.NotNil(t, client)
-	defer client.Close()
-
-	// Verify client mode was selected
-	output := buf.String()
-	assert.Contains(t, output, "DHT mode: client")
-
-	// Verify cleanup interval was NOT configured (client mode doesn't need it)
-	assert.NotContains(t, output, "Configuring DHT cleanup interval")
-}
-
-// TestDHTModeServerWithVariousCleanupIntervals tests server mode with different intervals
-func TestDHTModeServerWithVariousCleanupIntervals(t *testing.T) {
+// TestDHTModeSelection tests DHT mode configuration (server/client/default)
+func TestDHTModeSelection(t *testing.T) {
 	tests := []struct {
-		name     string
-		interval time.Duration
-		expected string
+		name              string
+		dhtMode           string
+		expectedLogMsg    string
+		additionalMsgOpt  string // optional additional message to check
 	}{
 		{
-			name:     "1 hour cleanup",
-			interval: 1 * time.Hour,
-			expected: "1h0m0s",
+			name:             "default mode (empty string defaults to server)",
+			dhtMode:          "",
+			expectedLogMsg:   "DHT mode: server",
+			additionalMsgOpt: "will advertise and store provider records",
 		},
 		{
-			name:     "24 hour cleanup (default recommended)",
-			interval: 24 * time.Hour,
-			expected: "24h0m0s",
+			name:             "explicit server mode",
+			dhtMode:          "server",
+			expectedLogMsg:   "DHT mode: server",
+			additionalMsgOpt: "will advertise and store provider records",
 		},
 		{
-			name:     "72 hour cleanup",
-			interval: 72 * time.Hour,
-			expected: "72h0m0s",
-		},
-		{
-			name:     "30 minute cleanup",
-			interval: 30 * time.Minute,
-			expected: "30m0s",
+			name:             "client mode",
+			dhtMode:          "client",
+			expectedLogMsg:   "DHT mode: client",
+			additionalMsgOpt: "query-only, no provider storage",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			privKey, err := GeneratePrivateKey()
-			require.NoError(t, err)
+			_, output := createTestClient(t, testClientConfig{
+				name:    "test-mode-" + tt.name,
+				dhtMode: tt.dhtMode,
+			})
 
-			var buf bytes.Buffer
-			oldOutput := log.Writer()
-			log.SetOutput(&buf)
-			defer log.SetOutput(oldOutput)
-
-			config := Config{
-				Name:               "test-" + tt.name,
-				PrivateKey:         privKey,
-				DHTMode:            "server",
-				DHTCleanupInterval: tt.interval,
+			assert.Contains(t, output, tt.expectedLogMsg)
+			if tt.additionalMsgOpt != "" {
+				assert.Contains(t, output, tt.additionalMsgOpt)
 			}
-
-			client, err := NewClient(config)
-			require.NoError(t, err)
-			require.NotNil(t, client)
-			defer client.Close()
-
-			// Verify cleanup interval was configured correctly
-			output := buf.String()
-			assert.Contains(t, output, "Configuring DHT cleanup interval: "+tt.expected)
 		})
 	}
 }
 
-// TestDHTConfigurationCombinations tests various DHT configuration combinations
-func TestDHTConfigurationCombinations(t *testing.T) {
+// TestDHTCleanupIntervalConfiguration tests cleanup interval settings
+func TestDHTCleanupIntervalConfiguration(t *testing.T) {
 	tests := []struct {
-		name                        string
-		dhtMode                     string
-		cleanupInterval             time.Duration
-		expectServerMode            bool
-		expectCleanupConfig         bool
-		expectedLogServerMessage    string
-		expectedLogClientMessage    string
-		expectedCleanupIntervalMsg  string
+		name                   string
+		dhtMode                string
+		cleanupInterval        time.Duration
+		expectCleanupConfigLog bool
+		expectedIntervalString string
 	}{
 		{
-			name:                     "default configuration (empty mode)",
-			dhtMode:                  "",
-			cleanupInterval:          0,
-			expectServerMode:         true,
-			expectCleanupConfig:      false,
-			expectedLogServerMessage: "DHT mode: server",
+			name:                   "server mode without cleanup interval (uses libp2p default)",
+			dhtMode:                "server",
+			cleanupInterval:        0,
+			expectCleanupConfigLog: false,
 		},
 		{
-			name:                     "server mode with custom cleanup",
-			dhtMode:                  "server",
-			cleanupInterval:          48 * time.Hour,
-			expectServerMode:         true,
-			expectCleanupConfig:      true,
-			expectedLogServerMessage: "DHT mode: server",
-			expectedCleanupIntervalMsg: "48h0m0s",
+			name:                   "server mode with 6 hour cleanup",
+			dhtMode:                "server",
+			cleanupInterval:        6 * time.Hour,
+			expectCleanupConfigLog: true,
+			expectedIntervalString: "6h0m0s",
 		},
 		{
-			name:                     "client mode with cleanup specified (ignored)",
-			dhtMode:                  "client",
-			cleanupInterval:          24 * time.Hour,
-			expectServerMode:         false,
-			expectCleanupConfig:      false,
-			expectedLogClientMessage: "DHT mode: client",
+			name:                   "server mode with 24 hour cleanup",
+			dhtMode:                "server",
+			cleanupInterval:        24 * time.Hour,
+			expectCleanupConfigLog: true,
+			expectedIntervalString: "24h0m0s",
 		},
 		{
-			name:                     "server mode without cleanup (uses default)",
-			dhtMode:                  "server",
-			cleanupInterval:          0,
-			expectServerMode:         true,
-			expectCleanupConfig:      false,
-			expectedLogServerMessage: "DHT mode: server",
+			name:                   "server mode with 72 hour cleanup",
+			dhtMode:                "server",
+			cleanupInterval:        72 * time.Hour,
+			expectCleanupConfigLog: true,
+			expectedIntervalString: "72h0m0s",
+		},
+		{
+			name:                   "server mode with 30 minute cleanup",
+			dhtMode:                "server",
+			cleanupInterval:        30 * time.Minute,
+			expectCleanupConfigLog: true,
+			expectedIntervalString: "30m0s",
+		},
+		{
+			name:                   "client mode ignores cleanup interval",
+			dhtMode:                "client",
+			cleanupInterval:        24 * time.Hour,
+			expectCleanupConfigLog: false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			privKey, err := GeneratePrivateKey()
-			require.NoError(t, err)
+			_, output := createTestClient(t, testClientConfig{
+				name:            "test-cleanup-" + tt.name,
+				dhtMode:         tt.dhtMode,
+				cleanupInterval: tt.cleanupInterval,
+			})
 
-			var buf bytes.Buffer
-			oldOutput := log.Writer()
-			log.SetOutput(&buf)
-			defer log.SetOutput(oldOutput)
-
-			config := Config{
-				Name:               "test-combo-" + tt.name,
-				PrivateKey:         privKey,
-				DHTMode:            tt.dhtMode,
-				DHTCleanupInterval: tt.cleanupInterval,
-			}
-
-			client, err := NewClient(config)
-			require.NoError(t, err, "client creation should succeed")
-			require.NotNil(t, client, "client should not be nil")
-			defer client.Close()
-
-			output := buf.String()
-
-			// Verify mode logging
-			if tt.expectServerMode {
-				assert.Contains(t, output, tt.expectedLogServerMessage)
-			} else {
-				assert.Contains(t, output, tt.expectedLogClientMessage)
-			}
-
-			// Verify cleanup interval logging
-			if tt.expectCleanupConfig {
+			if tt.expectCleanupConfigLog {
 				assert.Contains(t, output, "Configuring DHT cleanup interval")
-				if tt.expectedCleanupIntervalMsg != "" {
-					assert.Contains(t, output, tt.expectedCleanupIntervalMsg)
+				if tt.expectedIntervalString != "" {
+					assert.Contains(t, output, tt.expectedIntervalString)
 				}
 			} else {
 				assert.NotContains(t, output, "Configuring DHT cleanup interval")
@@ -325,34 +159,82 @@ func TestDHTConfigurationCombinations(t *testing.T) {
 	}
 }
 
-// TestDHTClientCanQuery verifies that client mode client can be created
-func TestDHTClientCanQuery(t *testing.T) {
-	privKey, err := GeneratePrivateKey()
-	require.NoError(t, err)
-
-	var buf bytes.Buffer
-	oldOutput := log.Writer()
-	log.SetOutput(&buf)
-	defer log.SetOutput(oldOutput)
-
-	config := Config{
-		Name:       "test-client-query",
-		PrivateKey: privKey,
-		DHTMode:    "client",
+// TestDHTConfigurationCombinations tests various configuration combinations
+func TestDHTConfigurationCombinations(t *testing.T) {
+	tests := []struct {
+		name                   string
+		dhtMode                string
+		cleanupInterval        time.Duration
+		expectedModeLog        string
+		expectCleanupConfigLog bool
+		expectedIntervalString string
+	}{
+		{
+			name:                   "default configuration (empty mode, no interval)",
+			dhtMode:                "",
+			cleanupInterval:        0,
+			expectedModeLog:        "DHT mode: server",
+			expectCleanupConfigLog: false,
+		},
+		{
+			name:                   "server mode with 48h cleanup",
+			dhtMode:                "server",
+			cleanupInterval:        48 * time.Hour,
+			expectedModeLog:        "DHT mode: server",
+			expectCleanupConfigLog: true,
+			expectedIntervalString: "48h0m0s",
+		},
+		{
+			name:                   "client mode with cleanup specified (ignored)",
+			dhtMode:                "client",
+			cleanupInterval:        24 * time.Hour,
+			expectedModeLog:        "DHT mode: client",
+			expectCleanupConfigLog: false,
+		},
+		{
+			name:                   "server mode without cleanup",
+			dhtMode:                "server",
+			cleanupInterval:        0,
+			expectedModeLog:        "DHT mode: server",
+			expectCleanupConfigLog: false,
+		},
 	}
 
-	client, err := NewClient(config)
-	require.NoError(t, err)
-	require.NotNil(t, client)
-	defer client.Close()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, output := createTestClient(t, testClientConfig{
+				name:            "test-combo-" + tt.name,
+				dhtMode:         tt.dhtMode,
+				cleanupInterval: tt.cleanupInterval,
+			})
 
-	// Verify client mode was selected (basic functional check)
-	output := buf.String()
+			assert.Contains(t, output, tt.expectedModeLog, "mode log should be present")
+
+			if tt.expectCleanupConfigLog {
+				assert.Contains(t, output, "Configuring DHT cleanup interval", "cleanup config should be logged")
+				if tt.expectedIntervalString != "" {
+					assert.Contains(t, output, tt.expectedIntervalString, "interval string should match")
+				}
+			} else {
+				assert.NotContains(t, output, "Configuring DHT cleanup interval", "cleanup config should not be logged")
+			}
+		})
+	}
+}
+
+// TestDHTClientBasicFunctionality verifies client mode basic operations
+func TestDHTClientBasicFunctionality(t *testing.T) {
+	client, output := createTestClient(t, testClientConfig{
+		name:    "test-client-functionality",
+		dhtMode: "client",
+	})
+
+	// Verify client mode was selected
 	assert.Contains(t, output, "DHT mode: client")
 
 	// Verify client has basic functionality
 	peerID := client.GetID()
-	assert.NotEmpty(t, peerID, "Client should have a peer ID")
+	assert.NotEmpty(t, peerID, "client should have a peer ID")
 }
 
 // TestP2PClientTypeAlias verifies backward compatibility type alias
@@ -379,7 +261,11 @@ func TestP2PClientTypeAlias(t *testing.T) {
 
 // BenchmarkDHTServerMode benchmarks client creation with server mode
 func BenchmarkDHTServerMode(b *testing.B) {
-	privKey, _ := GeneratePrivateKey()
+	privKey, err := GeneratePrivateKey()
+	if err != nil {
+		b.Fatal(err)
+	}
+
 	config := Config{
 		Name:               "bench-server",
 		PrivateKey:         privKey,
@@ -389,7 +275,10 @@ func BenchmarkDHTServerMode(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		client, _ := NewClient(config)
+		client, err := NewClient(config)
+		if err != nil {
+			b.Fatal(err)
+		}
 		if client != nil {
 			client.Close()
 		}
@@ -398,7 +287,11 @@ func BenchmarkDHTServerMode(b *testing.B) {
 
 // BenchmarkDHTClientMode benchmarks client creation with client mode
 func BenchmarkDHTClientMode(b *testing.B) {
-	privKey, _ := GeneratePrivateKey()
+	privKey, err := GeneratePrivateKey()
+	if err != nil {
+		b.Fatal(err)
+	}
+
 	config := Config{
 		Name:       "bench-client",
 		PrivateKey: privKey,
@@ -407,7 +300,10 @@ func BenchmarkDHTClientMode(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		client, _ := NewClient(config)
+		client, err := NewClient(config)
+		if err != nil {
+			b.Fatal(err)
+		}
 		if client != nil {
 			client.Close()
 		}
