@@ -39,6 +39,16 @@ updates:
       timezone: "America/New_York"
     allow:
       - dependency-type: "direct"
+    ignore:
+      # Ignore old libp2p packages that have been consolidated into go-libp2p
+      # These are transitive dependencies that cause false-positive Dependabot errors
+      - dependency-name: "github.com/libp2p/go-libp2p-peerstore"
+      - dependency-name: "github.com/libp2p/go-tcp-transport"
+      - dependency-name: "github.com/libp2p/go-ws-transport"
+      - dependency-name: "github.com/libp2p/go-conn-security-multistream"
+      - dependency-name: "github.com/libp2p/go-libp2p-swarm"
+      - dependency-name: "github.com/libp2p/go-libp2p-transport-upgrader"
+      - dependency-name: "github.com/libp2p/go-libp2p-nat"
     groups:
       security-deps:
         patterns:
@@ -68,6 +78,16 @@ updates:
       timezone: "America/New_York"
     allow:
       - dependency-type: "direct"
+    ignore:
+      # Ignore old libp2p packages that have been consolidated into go-libp2p
+      # These are transitive dependencies that cause false-positive Dependabot errors
+      - dependency-name: "github.com/libp2p/go-libp2p-peerstore"
+      - dependency-name: "github.com/libp2p/go-tcp-transport"
+      - dependency-name: "github.com/libp2p/go-ws-transport"
+      - dependency-name: "github.com/libp2p/go-conn-security-multistream"
+      - dependency-name: "github.com/libp2p/go-libp2p-swarm"
+      - dependency-name: "github.com/libp2p/go-libp2p-transport-upgrader"
+      - dependency-name: "github.com/libp2p/go-libp2p-nat"
     groups:
       security-deps:
         patterns:
