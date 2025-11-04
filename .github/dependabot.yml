@@ -1,6 +1,5 @@
 # ────────────────────────────────────────────────────────────────
 # Dependabot Configuration
-# Repo: mrz1836/<repo>
 #
 # Purpose:
 #   • Keep Go modules, GitHub Actions and DevContainer images/features
@@ -40,32 +39,8 @@ updates:
     allow:
       - dependency-type: "direct"
     ignore:
-      # Prevent Dependabot from considering ancient +incompatible versions
       - dependency-name: "github.com/libp2p/go-libp2p"
-        update-types: ["version-update:semver-major"]
-
-      # Ignore old libp2p standalone packages (wildcards to catch all variants)
-      - dependency-name: "github.com/libp2p/go-libp2p-peerstore*"
-      - dependency-name: "github.com/libp2p/go-tcp-transport*"
-      - dependency-name: "github.com/libp2p/go-ws-transport*"
-      - dependency-name: "github.com/libp2p/go-conn-security*"
-      - dependency-name: "github.com/libp2p/go-libp2p-swarm*"
-      - dependency-name: "github.com/libp2p/go-libp2p-transport*"
-      - dependency-name: "github.com/libp2p/go-libp2p-nat*"
-      - dependency-name: "github.com/libp2p/go-libp2p-host*"
-      - dependency-name: "github.com/libp2p/go-libp2p-net*"
-      - dependency-name: "github.com/libp2p/go-libp2p-protocol*"
-      - dependency-name: "github.com/libp2p/go-libp2p-interface*"
-      - dependency-name: "github.com/libp2p/go-libp2p-metrics*"
-      - dependency-name: "github.com/libp2p/go-libp2p-loggables*"
-      - dependency-name: "github.com/libp2p/go-libp2p-circuit*"
-      - dependency-name: "github.com/libp2p/go-libp2p-crypto*"
-      - dependency-name: "github.com/libp2p/go-libp2p-peer*"
-      - dependency-name: "github.com/libp2p/go-libp2p-secio*"
-      - dependency-name: "github.com/libp2p/go-stream-muxer*"
-      - dependency-name: "github.com/libp2p/go-maddr-filter*"
-      - dependency-name: "github.com/libp2p/go-mplex*"
-      - dependency-name: "github.com/whyrusleeping/go-smux*"
+        versions: ["v6.0.23+incompatible"]
     groups:
       security-deps:
         patterns:
@@ -83,63 +58,7 @@ updates:
       include: "scope"
 
   # ──────────────────────────────────────────────────────────────
-  # 2. Go Modules (go.mod / go.sum)
-  # ──────────────────────────────────────────────────────────────
-  - package-ecosystem: "gomod"
-    directory: "/example/"
-    target-branch: "main"
-    schedule:
-      interval: "weekly"
-      day: "monday"
-      time: "09:00"
-      timezone: "America/New_York"
-    allow:
-      - dependency-type: "direct"
-    ignore:
-      # Prevent Dependabot from considering ancient +incompatible versions
-      - dependency-name: "github.com/libp2p/go-libp2p"
-        update-types: ["version-update:semver-major"]
-
-      # Ignore old libp2p standalone packages (wildcards to catch all variants)
-      - dependency-name: "github.com/libp2p/go-libp2p-peerstore*"
-      - dependency-name: "github.com/libp2p/go-tcp-transport*"
-      - dependency-name: "github.com/libp2p/go-ws-transport*"
-      - dependency-name: "github.com/libp2p/go-conn-security*"
-      - dependency-name: "github.com/libp2p/go-libp2p-swarm*"
-      - dependency-name: "github.com/libp2p/go-libp2p-transport*"
-      - dependency-name: "github.com/libp2p/go-libp2p-nat*"
-      - dependency-name: "github.com/libp2p/go-libp2p-host*"
-      - dependency-name: "github.com/libp2p/go-libp2p-net*"
-      - dependency-name: "github.com/libp2p/go-libp2p-protocol*"
-      - dependency-name: "github.com/libp2p/go-libp2p-interface*"
-      - dependency-name: "github.com/libp2p/go-libp2p-metrics*"
-      - dependency-name: "github.com/libp2p/go-libp2p-loggables*"
-      - dependency-name: "github.com/libp2p/go-libp2p-circuit*"
-      - dependency-name: "github.com/libp2p/go-libp2p-crypto*"
-      - dependency-name: "github.com/libp2p/go-libp2p-peer*"
-      - dependency-name: "github.com/libp2p/go-libp2p-secio*"
-      - dependency-name: "github.com/libp2p/go-stream-muxer*"
-      - dependency-name: "github.com/libp2p/go-maddr-filter*"
-      - dependency-name: "github.com/libp2p/go-mplex*"
-      - dependency-name: "github.com/whyrusleeping/go-smux*"
-    groups:
-      security-deps:
-        patterns:
-          - "*crypto*"
-          - "*security*"
-          - "*auth*"
-          - "*jwt*"
-          - "*oauth*"
-        update-types: ["minor", "patch"]
-    open-pull-requests-limit: 10
-    assignees: ["mrz1836"]
-    labels: ["chore", "dependencies", "gomod"]
-    commit-message:
-      prefix: "chore"
-      include: "scope"
-
-  # ──────────────────────────────────────────────────────────────
-  # 3. GitHub Actions Workflows
+  # 2. GitHub Actions Workflows
   # ──────────────────────────────────────────────────────────────
   - package-ecosystem: "github-actions"
     directory: "/"
@@ -162,7 +81,7 @@ updates:
       include: "scope"
 
   # ──────────────────────────────────────────────────────────────
-  # 4. DevContainer (devcontainer.json : base image + features)
+  # 3. DevContainer (devcontainer.json : base image + features)
   # ──────────────────────────────────────────────────────────────
   - package-ecosystem: "devcontainers"
     directory: "/"
