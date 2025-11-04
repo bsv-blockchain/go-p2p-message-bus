@@ -186,9 +186,19 @@ func createHost(_ context.Context, hostOpts []libp2p.Option, config Config, rela
 			fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", config.Port),
 			fmt.Sprintf("/ip6/::/tcp/%d", config.Port),
 		),
-		libp2p.NATPortMap(),
-		libp2p.EnableNATService(),
-		libp2p.EnableHolePunching(),
+	)
+
+	// Only enable NAT traversal features if not disabled
+	// NAT features can cause data races in tests due to libp2p's NAT manager using non-thread-safe global state
+	if !config.DisableNAT {
+		hostOpts = append(hostOpts,
+			libp2p.NATPortMap(),
+			libp2p.EnableNATService(),
+			libp2p.EnableHolePunching(),
+		)
+	}
+
+	hostOpts = append(hostOpts,
 		libp2p.EnableRelay(),
 		libp2p.EnableAutoRelayWithStaticRelays(relayPeers),
 	)
