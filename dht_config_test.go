@@ -10,6 +10,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// Test log message constants to avoid duplication
+const (
+	logMsgDHTModeServer              = "DHT mode: server"
+	logMsgDHTModeClient              = "DHT mode: client"
+	logMsgConfiguringCleanupInterval = "Configuring DHT cleanup interval"
+)
+
 // testClientConfig is a helper to create a test client with log capture
 type testClientConfig struct {
 	name            string
@@ -56,19 +63,19 @@ func TestDHTModeSelection(t *testing.T) {
 		{
 			name:             "default mode (empty string defaults to server)",
 			dhtMode:          "",
-			expectedLogMsg:   "DHT mode: server",
+			expectedLogMsg:   logMsgDHTModeServer,
 			additionalMsgOpt: "will advertise and store provider records",
 		},
 		{
 			name:             "explicit server mode",
 			dhtMode:          "server",
-			expectedLogMsg:   "DHT mode: server",
+			expectedLogMsg:   logMsgDHTModeServer,
 			additionalMsgOpt: "will advertise and store provider records",
 		},
 		{
 			name:             "client mode",
 			dhtMode:          "client",
-			expectedLogMsg:   "DHT mode: client",
+			expectedLogMsg:   logMsgDHTModeClient,
 			additionalMsgOpt: "query-only, no provider storage",
 		},
 	}
@@ -148,12 +155,12 @@ func TestDHTCleanupIntervalConfiguration(t *testing.T) {
 			})
 
 			if tt.expectCleanupConfigLog {
-				assert.Contains(t, output, "Configuring DHT cleanup interval")
+				assert.Contains(t, output, logMsgConfiguringCleanupInterval)
 				if tt.expectedIntervalString != "" {
 					assert.Contains(t, output, tt.expectedIntervalString)
 				}
 			} else {
-				assert.NotContains(t, output, "Configuring DHT cleanup interval")
+				assert.NotContains(t, output, logMsgConfiguringCleanupInterval)
 			}
 		})
 	}
@@ -173,14 +180,14 @@ func TestDHTConfigurationCombinations(t *testing.T) {
 			name:                   "default configuration (empty mode, no interval)",
 			dhtMode:                "",
 			cleanupInterval:        0,
-			expectedModeLog:        "DHT mode: server",
+			expectedModeLog:        logMsgDHTModeServer,
 			expectCleanupConfigLog: false,
 		},
 		{
 			name:                   "server mode with 48h cleanup",
 			dhtMode:                "server",
 			cleanupInterval:        48 * time.Hour,
-			expectedModeLog:        "DHT mode: server",
+			expectedModeLog:        logMsgDHTModeServer,
 			expectCleanupConfigLog: true,
 			expectedIntervalString: "48h0m0s",
 		},
@@ -188,14 +195,14 @@ func TestDHTConfigurationCombinations(t *testing.T) {
 			name:                   "client mode with cleanup specified (ignored)",
 			dhtMode:                "client",
 			cleanupInterval:        24 * time.Hour,
-			expectedModeLog:        "DHT mode: client",
+			expectedModeLog:        logMsgDHTModeClient,
 			expectCleanupConfigLog: false,
 		},
 		{
 			name:                   "server mode without cleanup",
 			dhtMode:                "server",
 			cleanupInterval:        0,
-			expectedModeLog:        "DHT mode: server",
+			expectedModeLog:        logMsgDHTModeServer,
 			expectCleanupConfigLog: false,
 		},
 	}
@@ -211,12 +218,12 @@ func TestDHTConfigurationCombinations(t *testing.T) {
 			assert.Contains(t, output, tt.expectedModeLog, "mode log should be present")
 
 			if tt.expectCleanupConfigLog {
-				assert.Contains(t, output, "Configuring DHT cleanup interval", "cleanup config should be logged")
+				assert.Contains(t, output, logMsgConfiguringCleanupInterval, "cleanup config should be logged")
 				if tt.expectedIntervalString != "" {
 					assert.Contains(t, output, tt.expectedIntervalString, "interval string should match")
 				}
 			} else {
-				assert.NotContains(t, output, "Configuring DHT cleanup interval", "cleanup config should not be logged")
+				assert.NotContains(t, output, logMsgConfiguringCleanupInterval, "cleanup config should not be logged")
 			}
 		})
 	}
@@ -230,7 +237,7 @@ func TestDHTClientBasicFunctionality(t *testing.T) {
 	})
 
 	// Verify client mode was selected
-	assert.Contains(t, output, "DHT mode: client")
+	assert.Contains(t, output, logMsgDHTModeClient)
 
 	// Verify client has basic functionality
 	peerID := client.GetID()
