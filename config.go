@@ -97,4 +97,10 @@ type Config struct {
 	// Recommended: 6-24 hours for production to reduce CPU overhead.
 	// The cleanup frequency trades off between memory usage (stale records) and CPU usage.
 	DHTCleanupInterval time.Duration
+
+	// DisableNAT disables NAT traversal features (UPnP/NAT-PMP port mapping, NAT service, hole punching).
+	// Set to true in test environments where NAT traversal is not needed and can cause data races
+	// due to libp2p's NAT manager using non-thread-safe global state.
+	// Default: false (NAT features enabled)
+	DisableNAT bool
 }
