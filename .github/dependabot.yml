@@ -40,15 +40,32 @@ updates:
     allow:
       - dependency-type: "direct"
     ignore:
-      # Ignore old libp2p packages that have been consolidated into go-libp2p
-      # These are transitive dependencies that cause false-positive Dependabot errors
-      - dependency-name: "github.com/libp2p/go-libp2p-peerstore"
-      - dependency-name: "github.com/libp2p/go-tcp-transport"
-      - dependency-name: "github.com/libp2p/go-ws-transport"
-      - dependency-name: "github.com/libp2p/go-conn-security-multistream"
-      - dependency-name: "github.com/libp2p/go-libp2p-swarm"
-      - dependency-name: "github.com/libp2p/go-libp2p-transport-upgrader"
-      - dependency-name: "github.com/libp2p/go-libp2p-nat"
+      # Prevent Dependabot from considering ancient +incompatible versions
+      - dependency-name: "github.com/libp2p/go-libp2p"
+        update-types: ["version-update:semver-major"]
+
+      # Ignore old libp2p standalone packages (wildcards to catch all variants)
+      - dependency-name: "github.com/libp2p/go-libp2p-peerstore*"
+      - dependency-name: "github.com/libp2p/go-tcp-transport*"
+      - dependency-name: "github.com/libp2p/go-ws-transport*"
+      - dependency-name: "github.com/libp2p/go-conn-security*"
+      - dependency-name: "github.com/libp2p/go-libp2p-swarm*"
+      - dependency-name: "github.com/libp2p/go-libp2p-transport*"
+      - dependency-name: "github.com/libp2p/go-libp2p-nat*"
+      - dependency-name: "github.com/libp2p/go-libp2p-host*"
+      - dependency-name: "github.com/libp2p/go-libp2p-net*"
+      - dependency-name: "github.com/libp2p/go-libp2p-protocol*"
+      - dependency-name: "github.com/libp2p/go-libp2p-interface*"
+      - dependency-name: "github.com/libp2p/go-libp2p-metrics*"
+      - dependency-name: "github.com/libp2p/go-libp2p-loggables*"
+      - dependency-name: "github.com/libp2p/go-libp2p-circuit*"
+      - dependency-name: "github.com/libp2p/go-libp2p-crypto*"
+      - dependency-name: "github.com/libp2p/go-libp2p-peer*"
+      - dependency-name: "github.com/libp2p/go-libp2p-secio*"
+      - dependency-name: "github.com/libp2p/go-stream-muxer*"
+      - dependency-name: "github.com/libp2p/go-maddr-filter*"
+      - dependency-name: "github.com/libp2p/go-mplex*"
+      - dependency-name: "github.com/whyrusleeping/go-smux*"
     groups:
       security-deps:
         patterns:
@@ -79,15 +96,32 @@ updates:
     allow:
       - dependency-type: "direct"
     ignore:
-      # Ignore old libp2p packages that have been consolidated into go-libp2p
-      # These are transitive dependencies that cause false-positive Dependabot errors
-      - dependency-name: "github.com/libp2p/go-libp2p-peerstore"
-      - dependency-name: "github.com/libp2p/go-tcp-transport"
-      - dependency-name: "github.com/libp2p/go-ws-transport"
-      - dependency-name: "github.com/libp2p/go-conn-security-multistream"
-      - dependency-name: "github.com/libp2p/go-libp2p-swarm"
-      - dependency-name: "github.com/libp2p/go-libp2p-transport-upgrader"
-      - dependency-name: "github.com/libp2p/go-libp2p-nat"
+      # Prevent Dependabot from considering ancient +incompatible versions
+      - dependency-name: "github.com/libp2p/go-libp2p"
+        update-types: ["version-update:semver-major"]
+
+      # Ignore old libp2p standalone packages (wildcards to catch all variants)
+      - dependency-name: "github.com/libp2p/go-libp2p-peerstore*"
+      - dependency-name: "github.com/libp2p/go-tcp-transport*"
+      - dependency-name: "github.com/libp2p/go-ws-transport*"
+      - dependency-name: "github.com/libp2p/go-conn-security*"
+      - dependency-name: "github.com/libp2p/go-libp2p-swarm*"
+      - dependency-name: "github.com/libp2p/go-libp2p-transport*"
+      - dependency-name: "github.com/libp2p/go-libp2p-nat*"
+      - dependency-name: "github.com/libp2p/go-libp2p-host*"
+      - dependency-name: "github.com/libp2p/go-libp2p-net*"
+      - dependency-name: "github.com/libp2p/go-libp2p-protocol*"
+      - dependency-name: "github.com/libp2p/go-libp2p-interface*"
+      - dependency-name: "github.com/libp2p/go-libp2p-metrics*"
+      - dependency-name: "github.com/libp2p/go-libp2p-loggables*"
+      - dependency-name: "github.com/libp2p/go-libp2p-circuit*"
+      - dependency-name: "github.com/libp2p/go-libp2p-crypto*"
+      - dependency-name: "github.com/libp2p/go-libp2p-peer*"
+      - dependency-name: "github.com/libp2p/go-libp2p-secio*"
+      - dependency-name: "github.com/libp2p/go-stream-muxer*"
+      - dependency-name: "github.com/libp2p/go-maddr-filter*"
+      - dependency-name: "github.com/libp2p/go-mplex*"
+      - dependency-name: "github.com/whyrusleeping/go-smux*"
     groups:
       security-deps:
         patterns:
