@@ -31,7 +31,7 @@ ignore:
   - ".mage-cache/**"
   - ".vscode/**"
   - "bin/**"
-  - "example/**"
+  - "cmd/**"
   - "examples/**"
   - "mocks/**"
   - "testing/**"

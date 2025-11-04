@@ -177,7 +177,7 @@ go get -u github.com/bsv-blockchain/go-p2p-message-bus
 ## 📚 Documentation
 
 - **API Reference** – Dive into the godocs at [pkg.go.dev/github.com/bsv-blockchain/go-p2p-message-bus](https://pkg.go.dev/github.com/bsv-blockchain/go-p2p-message-bus)
-- **Usage Examples** – Browse practical patterns either the [examples directory](example) or the example tests
+- **Usage Examples** – Browse practical patterns either the [examples directory](cmd/example) or the example tests
 - **Benchmarks** – Check the latest numbers in the benchmark results
 - **Test Suite** – Review both the unit tests and fuzz tests (powered by [`testify`](https://github.com/stretchr/testify))
 
@@ -563,7 +563,7 @@ Uses GossipSub for efficient topic-based message propagation:
 
 ## 🧪 Examples & Tests
 
-All unit tests and [examples](example) run via [GitHub Actions](https://github.com/bsv-blockchain/go-p2p-message-bus/actions) and use [Go version 1.24.x](https://go.dev/doc/go1.24). View the [configuration file](.github/workflows/fortress.yml).
+All unit tests and [examples](cmd/example) run via [GitHub Actions](https://github.com/bsv-blockchain/go-p2p-message-bus/actions) and use [Go version 1.24.x](https://go.dev/doc/go1.24). View the [configuration file](.github/workflows/fortress.yml).
 
 Run all tests (fast):
 
@@ -580,20 +580,18 @@ magex test:race
 <summary><strong><code>Running the Example</code></strong></summary>
 <br/>
 
-See [example/main.go](example/main.go) for a complete working example.
+See [cmd/example/main.go](cmd/example/main.go) for a complete working example.
 
 To run the example:
 
 ```bash
-cd example
-go run main.go -name "node1"
+go run ./cmd/example -name "node1"
 ```
 
 In another terminal:
 
 ```bash
-cd example
-go run main.go -name "node2"
+go run ./cmd/example -name "node2"
 ```
 
 The two nodes will discover each other and exchange messages.
