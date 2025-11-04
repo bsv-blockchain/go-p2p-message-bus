@@ -30,7 +30,7 @@ func TestDHTModeDefault(t *testing.T) {
 	client, err := NewClient(config)
 	require.NoError(t, err)
 	require.NotNil(t, client)
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	// Verify server mode was selected
 	output := buf.String()
@@ -57,7 +57,7 @@ func TestDHTModeServer(t *testing.T) {
 	client, err := NewClient(config)
 	require.NoError(t, err)
 	require.NotNil(t, client)
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	// Verify server mode was selected
 	output := buf.String()
@@ -83,7 +83,7 @@ func TestDHTModeClient(t *testing.T) {
 	client, err := NewClient(config)
 	require.NoError(t, err)
 	require.NotNil(t, client)
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	// Verify client mode was selected
 	output := buf.String()
@@ -111,7 +111,7 @@ func TestDHTCleanupIntervalDefault(t *testing.T) {
 	client, err := NewClient(config)
 	require.NoError(t, err)
 	require.NotNil(t, client)
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	// Verify cleanup interval configuration is NOT logged (uses libp2p default)
 	output := buf.String()
@@ -139,7 +139,7 @@ func TestDHTCleanupIntervalCustom(t *testing.T) {
 	client, err := NewClient(config)
 	require.NoError(t, err)
 	require.NotNil(t, client)
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	// Verify cleanup interval configuration was logged
 	output := buf.String()
@@ -166,7 +166,7 @@ func TestDHTCleanupIntervalIgnoredInClientMode(t *testing.T) {
 	client, err := NewClient(config)
 	require.NoError(t, err)
 	require.NotNil(t, client)
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	// Verify client mode was selected
 	output := buf.String()
@@ -225,7 +225,7 @@ func TestDHTModeServerWithVariousCleanupIntervals(t *testing.T) {
 			client, err := NewClient(config)
 			require.NoError(t, err)
 			require.NotNil(t, client)
-			defer client.Close()
+			defer func() { _ = client.Close() }()
 
 			// Verify cleanup interval was configured correctly
 			output := buf.String()
@@ -301,7 +301,7 @@ func TestDHTConfigurationCombinations(t *testing.T) {
 			client, err := NewClient(config)
 			require.NoError(t, err, "client creation should succeed")
 			require.NotNil(t, client, "client should not be nil")
-			defer client.Close()
+			defer func() { _ = client.Close() }()
 
 			output := buf.String()
 
@@ -344,7 +344,7 @@ func TestDHTClientCanQuery(t *testing.T) {
 	client, err := NewClient(config)
 	require.NoError(t, err)
 	require.NotNil(t, client)
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	// Verify client mode was selected (basic functional check)
 	output := buf.String()
@@ -370,10 +370,10 @@ func TestP2PClientTypeAlias(t *testing.T) {
 	p2pClient, err = NewClient(config)
 	require.NoError(t, err)
 	require.NotNil(t, p2pClient)
-	defer p2pClient.Close()
+	defer func() { _ = p2pClient.Close() }()
 
 	// Verify it's also a Client
-	var client Client = p2pClient
+	client := p2pClient
 	assert.NotNil(t, client)
 }
 
@@ -391,7 +391,7 @@ func BenchmarkDHTServerMode(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		client, _ := NewClient(config)
 		if client != nil {
-			client.Close()
+			_ = client.Close()
 		}
 	}
 }
@@ -409,7 +409,7 @@ func BenchmarkDHTClientMode(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		client, _ := NewClient(config)
 		if client != nil {
-			client.Close()
+			_ = client.Close()
 		}
 	}
 }
