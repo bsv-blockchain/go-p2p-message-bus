@@ -40,7 +40,7 @@ func createTestClient(t *testing.T, cfg testClientConfig) (Client, string) {
 	client, err := NewClient(config)
 	require.NoError(t, err, "failed to create client")
 	require.NotNil(t, client, "client should not be nil")
-	t.Cleanup(func() { client.Close() })
+	t.Cleanup(func() { _ = client.Close() })
 
 	return client, buf.String()
 }
@@ -48,10 +48,10 @@ func createTestClient(t *testing.T, cfg testClientConfig) (Client, string) {
 // TestDHTModeSelection tests DHT mode configuration (server/client/default)
 func TestDHTModeSelection(t *testing.T) {
 	tests := []struct {
-		name              string
-		dhtMode           string
-		expectedLogMsg    string
-		additionalMsgOpt  string // optional additional message to check
+		name             string
+		dhtMode          string
+		expectedLogMsg   string
+		additionalMsgOpt string // optional additional message to check
 	}{
 		{
 			name:             "default mode (empty string defaults to server)",
@@ -252,10 +252,10 @@ func TestP2PClientTypeAlias(t *testing.T) {
 	p2pClient, err = NewClient(config)
 	require.NoError(t, err)
 	require.NotNil(t, p2pClient)
-	defer p2pClient.Close()
+	defer func() { _ = p2pClient.Close() }()
 
 	// Verify it's also a Client
-	var client Client = p2pClient
+	client := p2pClient
 	assert.NotNil(t, client)
 }
 
@@ -280,7 +280,7 @@ func BenchmarkDHTServerMode(b *testing.B) {
 			b.Fatal(err)
 		}
 		if client != nil {
-			client.Close()
+			_ = client.Close()
 		}
 	}
 }
@@ -305,7 +305,7 @@ func BenchmarkDHTClientMode(b *testing.B) {
 			b.Fatal(err)
 		}
 		if client != nil {
-			client.Close()
+			_ = client.Close()
 		}
 	}
 }
