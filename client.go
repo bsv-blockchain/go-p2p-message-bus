@@ -19,6 +19,7 @@ import (
 
 	"github.com/libp2p/go-libp2p"
 	dht "github.com/libp2p/go-libp2p-kad-dht"
+	"github.com/libp2p/go-libp2p-kad-dht/records"
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
 	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/host"
@@ -27,6 +28,9 @@ import (
 	"github.com/libp2p/go-libp2p/p2p/discovery/mdns"
 	drouting "github.com/libp2p/go-libp2p/p2p/discovery/routing"
 	"github.com/multiformats/go-multiaddr"
+
+	ds "github.com/ipfs/go-datastore"
+	dssync "github.com/ipfs/go-datastore/sync"
 )
 
 var (
@@ -92,7 +96,7 @@ func NewClient(config Config) (Client, error) {
 	}
 
 	// Set up DHT
-	kadDHT, err := setupDHT(ctx, h, bootstrapPeers, clientLogger, cancel)
+	kadDHT, err := setupDHT(ctx, h, config, bootstrapPeers, clientLogger, cancel)
 	if err != nil {
 		return nil, err
 	}
@@ -204,8 +208,46 @@ func createHost(_ context.Context, hostOpts []libp2p.Option, config Config, rela
 	return h, nil
 }
 
-func setupDHT(ctx context.Context, h host.Host, bootstrapPeers []peer.AddrInfo, _ logger, cancel context.CancelFunc) (*dht.IpfsDHT, error) {
-	kadDHT, err := dht.New(ctx, h, dht.Mode(dht.ModeServer), dht.BootstrapPeers(bootstrapPeers...))
+func setupDHT(ctx context.Context, h host.Host, config Config, bootstrapPeers []peer.AddrInfo, log logger, cancel context.CancelFunc) (*dht.IpfsDHT, error) {
+	// Determine DHT mode (default to server)
+	mode := dht.ModeServer
+	if config.DHTMode == "client" {
+		mode = dht.ModeClient
+		log.Infof("DHT mode: client (query-only, no provider storage)")
+	} else {
+		log.Infof("DHT mode: server (will advertise and store provider records)")
+	}
+
+	// Build DHT options
+	dhtOpts := []dht.Option{
+		dht.Mode(mode),
+		dht.BootstrapPeers(bootstrapPeers...),
+	}
+
+	// If server mode and custom cleanup interval specified, configure ProviderManager
+	if mode == dht.ModeServer && config.DHTCleanupInterval > 0 {
+		log.Infof("Configuring DHT cleanup interval: %v", config.DHTCleanupInterval)
+
+		// Create an in-memory datastore for the provider manager
+		// Same as default DHT datastore creation
+		datastore := dssync.MutexWrap(ds.NewMapDatastore())
+
+		providerManager, err := records.NewProviderManager(
+			ctx,
+			h.ID(),
+			h.Peerstore(),
+			datastore,
+			records.CleanupInterval(config.DHTCleanupInterval),
+		)
+		if err != nil {
+			_ = h.Close()
+			cancel()
+			return nil, fmt.Errorf("failed to create provider manager: %w", err)
+		}
+		dhtOpts = append(dhtOpts, dht.ProviderStore(providerManager))
+	}
+
+	kadDHT, err := dht.New(ctx, h, dhtOpts...)
 	if err != nil {
 		_ = h.Close()
 		cancel()

@@ -27,6 +27,11 @@ type Client interface {
 	Close() error
 }
 
+// P2PClient is a type alias for Client, maintained for backward compatibility.
+//
+//nolint:revive // P2PClient is intentionally named for backward compatibility, stuttering is acceptable
+type P2PClient = Client
+
 // Message represents a received message from a peer.
 type Message struct {
 	Topic     string    // The topic this message was received on
