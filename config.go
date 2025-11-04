@@ -79,4 +79,22 @@ type Config struct {
 	// If not provided, bootstrap peers will be used as relays.
 	// Example: []string{"/ip4/1.2.3.4/tcp/4001/p2p/QmPeerID"}
 	RelayPeers []string
+
+	// DHTMode specifies whether this node runs the DHT in client or server mode.
+	// Valid values: "client", "server"
+	// - "client": Can query DHT but doesn't advertise itself or store provider records.
+	//             No ProviderManager cleanup overhead.
+	// - "server": Participates fully in DHT, advertises itself, stores provider records.
+	//             Has periodic cleanup overhead. Default mode for proper P2P networks.
+	// If not provided or empty, defaults to "server" mode.
+	DHTMode string
+
+	// DHTCleanupInterval is the interval at which the DHT's ProviderManager performs
+	// garbage collection of expired provider records. The cleanup involves querying all
+	// provider records and removing expired entries.
+	// Only applies when DHTMode is "server".
+	// If not provided or zero, uses the DHT default (1 hour).
+	// Recommended: 6-24 hours for production to reduce CPU overhead.
+	// The cleanup frequency trades off between memory usage (stale records) and CPU usage.
+	DHTCleanupInterval time.Duration
 }
