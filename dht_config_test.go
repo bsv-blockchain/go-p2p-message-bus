@@ -237,14 +237,14 @@ func TestDHTModeServerWithVariousCleanupIntervals(t *testing.T) {
 // TestDHTConfigurationCombinations tests various DHT configuration combinations
 func TestDHTConfigurationCombinations(t *testing.T) {
 	tests := []struct {
-		name                        string
-		dhtMode                     string
-		cleanupInterval             time.Duration
-		expectServerMode            bool
-		expectCleanupConfig         bool
-		expectedLogServerMessage    string
-		expectedLogClientMessage    string
-		expectedCleanupIntervalMsg  string
+		name                       string
+		dhtMode                    string
+		cleanupInterval            time.Duration
+		expectServerMode           bool
+		expectCleanupConfig        bool
+		expectedLogServerMessage   string
+		expectedLogClientMessage   string
+		expectedCleanupIntervalMsg string
 	}{
 		{
 			name:                     "default configuration (empty mode)",
@@ -255,12 +255,12 @@ func TestDHTConfigurationCombinations(t *testing.T) {
 			expectedLogServerMessage: "DHT mode: server",
 		},
 		{
-			name:                     "server mode with custom cleanup",
-			dhtMode:                  "server",
-			cleanupInterval:          48 * time.Hour,
-			expectServerMode:         true,
-			expectCleanupConfig:      true,
-			expectedLogServerMessage: "DHT mode: server",
+			name:                       "server mode with custom cleanup",
+			dhtMode:                    "server",
+			cleanupInterval:            48 * time.Hour,
+			expectServerMode:           true,
+			expectCleanupConfig:        true,
+			expectedLogServerMessage:   "DHT mode: server",
 			expectedCleanupIntervalMsg: "48h0m0s",
 		},
 		{
