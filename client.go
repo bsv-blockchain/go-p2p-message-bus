@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"slices"
 	"strings"
@@ -28,6 +29,7 @@ import (
 	"github.com/libp2p/go-libp2p/p2p/discovery/mdns"
 	drouting "github.com/libp2p/go-libp2p/p2p/discovery/routing"
 	"github.com/multiformats/go-multiaddr"
+	manet "github.com/multiformats/go-multiaddr/net"
 
 	ds "github.com/ipfs/go-datastore"
 	dssync "github.com/ipfs/go-datastore/sync"
@@ -114,12 +116,17 @@ func NewClient(config Config) (Client, error) {
 		return nil, fmt.Errorf("failed to create pubsub: %w", err)
 	}
 
-	// Set up mDNS discovery
-	mdnsService := mdns.NewMdnsService(h, "", &discoveryNotifee{h: h, ctx: ctx, logger: clientLogger})
-	if err := mdnsService.Start(); err != nil {
-		clientLogger.Errorf("mDNS failed to start: %v", err)
+	// Set up mDNS discovery (only if explicitly enabled)
+	var mdnsService mdns.Service
+	if config.EnableMDNS {
+		mdnsService = mdns.NewMdnsService(h, "", &discoveryNotifee{h: h, ctx: ctx, logger: clientLogger})
+		if err := mdnsService.Start(); err != nil {
+			clientLogger.Errorf("mDNS failed to start: %v", err)
+		} else {
+			clientLogger.Infof("mDNS discovery started")
+		}
 	} else {
-		clientLogger.Infof("mDNS discovery started")
+		clientLogger.Infof("mDNS discovery disabled (production safe default)")
 	}
 
 	c := &client{
@@ -623,6 +630,15 @@ func (c *client) connectToDiscoveredPeer(ctx context.Context, peerInfo peer.Addr
 		return
 	}
 
+	// Filter private IPs unless explicitly allowed (default: filter for production safety)
+	if !c.config.AllowPrivateIPs {
+		peerInfo.Addrs = filterPrivateAddrs(peerInfo.Addrs)
+		if len(peerInfo.Addrs) == 0 {
+			// All addresses were private, skip this peer
+			return
+		}
+	}
+
 	if err := c.host.Connect(ctx, peerInfo); err != nil {
 		if c.shouldLogConnectionError(err) {
 			c.logger.Debugf("Failed to connect to discovered peer %s: %v", peerInfo.ID.String(), err)
@@ -912,4 +928,80 @@ func PrivateKeyFromHex(keyHex string) (crypto.PrivKey, error) {
 	}
 
 	return priv, nil
+}
+
+// filterPrivateAddrs filters out private/local IP addresses from a list of multiaddrs.
+// Returns only public routable addresses suitable for cloud/shared hosting environments.
+func filterPrivateAddrs(addrs []multiaddr.Multiaddr) []multiaddr.Multiaddr {
+	filtered := make([]multiaddr.Multiaddr, 0, len(addrs))
+
+	for _, addr := range addrs {
+		// Convert multiaddr to net.Addr to check if it's private
+		netAddr, err := manet.ToNetAddr(addr)
+		if err != nil {
+			// If we can't parse it, skip it
+			continue
+		}
+
+		// Extract IP address
+		var ip net.IP
+		switch v := netAddr.(type) {
+		case *net.TCPAddr:
+			ip = v.IP
+		case *net.UDPAddr:
+			ip = v.IP
+		default:
+			// Unknown address type, skip it
+			continue
+		}
+
+		// Filter out private/local addresses
+		if isPrivateIP(ip) {
+			continue
+		}
+
+		filtered = append(filtered, addr)
+	}
+
+	return filtered
+}
+
+// isPrivateIP checks if an IP address is private or local.
+// Returns true for:
+// - RFC1918 private networks (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16)
+// - Link-local addresses (169.254.0.0/16)
+// - Loopback addresses (127.0.0.0/8)
+// - IPv6 unique local addresses (fc00::/7)
+// - IPv6 link-local addresses (fe80::/10)
+func isPrivateIP(ip net.IP) bool {
+	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return true
+	}
+
+	// Check for private IPv4 ranges
+	if ip4 := ip.To4(); ip4 != nil {
+		// 10.0.0.0/8
+		if ip4[0] == 10 {
+			return true
+		}
+		// 172.16.0.0/12
+		if ip4[0] == 172 && ip4[1] >= 16 && ip4[1] <= 31 {
+			return true
+		}
+		// 192.168.0.0/16
+		if ip4[0] == 192 && ip4[1] == 168 {
+			return true
+		}
+		// 169.254.0.0/16 (link-local)
+		if ip4[0] == 169 && ip4[1] == 254 {
+			return true
+		}
+	}
+
+	// Check for IPv6 unique local addresses (fc00::/7)
+	if len(ip) == net.IPv6len && ip[0]&0xfe == 0xfc {
+		return true
+	}
+
+	return false
 }
