@@ -103,4 +103,22 @@ type Config struct {
 	// due to libp2p's NAT manager using non-thread-safe global state.
 	// Default: false (NAT features enabled)
 	DisableNAT bool
+
+	// EnableMDNS enables multicast DNS peer discovery on the local network.
+	// When true, the node broadcasts mDNS queries to discover peers on the same LAN.
+	// IMPORTANT: Only enable on isolated local networks with proper VLANs. On shared hosting
+	// (e.g., Hetzner, AWS) without VLANs, mDNS broadcasts appear as network scanning and may
+	// result in abuse reports.
+	// Default: false (mDNS disabled for production safety)
+	// Set to true only for local development networks with proper isolation
+	EnableMDNS bool
+
+	// AllowPrivateIPs allows connections to private/local IP addresses during peer discovery.
+	// When true, the node will attempt to connect to RFC1918 private networks (10.0.0.0/8,
+	// 172.16.0.0/12, 192.168.0.0/16), link-local addresses (169.254.0.0/16), and localhost.
+	// IMPORTANT: Only enable on private networks. On shared hosting, this may trigger network
+	// scanning alerts.
+	// Default: false (private IPs filtered for production safety)
+	// Set to true only for local development or private network deployments
+	AllowPrivateIPs bool
 }
