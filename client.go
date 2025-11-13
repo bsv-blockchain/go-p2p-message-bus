@@ -966,42 +966,11 @@ func filterPrivateAddrs(addrs []multiaddr.Multiaddr) []multiaddr.Multiaddr {
 	return filtered
 }
 
-// isPrivateIP checks if an IP address is private or local.
+// isPrivateIP checks if an IP address is private or local using Go's standard library.
 // Returns true for:
-// - RFC1918 private networks (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16)
-// - Link-local addresses (169.254.0.0/16)
-// - Loopback addresses (127.0.0.0/8)
-// - IPv6 unique local addresses (fc00::/7)
-// - IPv6 link-local addresses (fe80::/10)
+// - RFC1918 private networks (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) via IP.IsPrivate()
+// - Link-local, loopback, and multicast addresses via built-in methods
+// - IPv6 unique local addresses (fc00::/7) via IP.IsPrivate()
 func isPrivateIP(ip net.IP) bool {
-	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
-		return true
-	}
-
-	// Check for private IPv4 ranges
-	if ip4 := ip.To4(); ip4 != nil {
-		// 10.0.0.0/8
-		if ip4[0] == 10 {
-			return true
-		}
-		// 172.16.0.0/12
-		if ip4[0] == 172 && ip4[1] >= 16 && ip4[1] <= 31 {
-			return true
-		}
-		// 192.168.0.0/16
-		if ip4[0] == 192 && ip4[1] == 168 {
-			return true
-		}
-		// 169.254.0.0/16 (link-local)
-		if ip4[0] == 169 && ip4[1] == 254 {
-			return true
-		}
-	}
-
-	// Check for IPv6 unique local addresses (fc00::/7)
-	if len(ip) == net.IPv6len && ip[0]&0xfe == 0xfc {
-		return true
-	}
-
-	return false
+	return ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()
 }
