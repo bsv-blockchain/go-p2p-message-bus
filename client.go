@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"testing"
 	"time"
 
 	"github.com/libp2p/go-libp2p"
@@ -86,8 +87,17 @@ func NewClient(config Config) (Client, error) {
 		return nil, err
 	}
 
-	// Get bootstrap peers from DHT library for DHT bootstrapping
-	bootstrapPeers := dht.GetDefaultBootstrapPeerAddrInfos()
+	// Get bootstrap peers based on environment
+	// Test mode: empty list for fast, isolated tests
+	// Production: IPFS default bootstrap peers
+	var bootstrapPeers []peer.AddrInfo
+	if testing.Testing() {
+		bootstrapPeers = []peer.AddrInfo{}
+		clientLogger.Infof("Test mode detected - using no bootstrap peers (isolated mode)")
+	} else {
+		bootstrapPeers = dht.GetDefaultBootstrapPeerAddrInfos()
+		clientLogger.Infof("Using %d default IPFS bootstrap peers", len(bootstrapPeers))
+	}
 
 	// Parse custom relay peers if provided
 	customRelayPeers := parseRelayPeersFromConfig(config.RelayPeers, clientLogger)
