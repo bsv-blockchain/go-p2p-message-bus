@@ -36,11 +36,6 @@ type Config struct {
 	// so other peers can identify the sender.
 	Name string
 
-	// BootstrapPeers is an optional list of multiaddr strings for initial peers to connect to.
-	// If not provided, the client will use libp2p's default bootstrap peers.
-	// Example: []string{"/ip4/192.168.1.100/tcp/4001/p2p/QmPeerID"}
-	BootstrapPeers []string
-
 	// Logger is an optional logger to use for logging. If not provided, the client will use
 	// DefaultLogger. Set to a custom implementation to integrate with your logging framework.
 	Logger logger
@@ -98,11 +93,12 @@ type Config struct {
 	// The cleanup frequency trades off between memory usage (stale records) and CPU usage.
 	DHTCleanupInterval time.Duration
 
-	// DisableNAT disables NAT traversal features (UPnP/NAT-PMP port mapping, NAT service, hole punching).
-	// Set to true in test environments where NAT traversal is not needed and can cause data races
-	// due to libp2p's NAT manager using non-thread-safe global state.
-	// Default: false (NAT features enabled)
-	DisableNAT bool
+	// EnableNAT enables UPnP/NAT-PMP automatic port mapping features.
+	// When true, the node will scan the local gateway (e.g., 10.0.0.1) to configure port forwarding.
+	// IMPORTANT: This triggers network scanning alerts on shared hosting (Hetzner, AWS, etc.).
+	// Only enable for local development behind a home router/NAT.
+	// Default: false (NAT features disabled for production safety)
+	EnableNAT bool
 
 	// EnableMDNS enables multicast DNS peer discovery on the local network.
 	// When true, the node broadcasts mDNS queries to discover peers on the same LAN.

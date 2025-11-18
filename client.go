@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"testing"
 	"time"
 
 	"github.com/libp2p/go-libp2p"
@@ -28,6 +29,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/p2p/discovery/mdns"
 	drouting "github.com/libp2p/go-libp2p/p2p/discovery/routing"
+	"github.com/libp2p/go-libp2p/p2p/net/conngater"
 	"github.com/multiformats/go-multiaddr"
 	manet "github.com/multiformats/go-multiaddr/net"
 
@@ -85,11 +87,7 @@ func NewClient(config Config) (Client, error) {
 		return nil, err
 	}
 
-	// Get bootstrap peers from DHT library for DHT bootstrapping
-	bootstrapPeers := dht.GetDefaultBootstrapPeerAddrInfos()
-
-	// Determine which peers to use as relays
-	relayPeers := configureRelayPeers(config.RelayPeers, bootstrapPeers, clientLogger)
+	bootstrapPeers, relayPeers := getBootstrapAndRelayPeers(config, clientLogger)
 
 	// Create and setup libp2p host
 	h, err := createHost(ctx, hostOpts, config, relayPeers, clientLogger, cancel)
@@ -152,6 +150,34 @@ func NewClient(config Config) (Client, error) {
 	return c, nil
 }
 
+func getBootstrapAndRelayPeers(config Config, clientLogger logger) ([]peer.AddrInfo, []peer.AddrInfo) {
+	// Get bootstrap peers based on environment
+	// Test mode: empty list for fast, isolated tests
+	// Production: IPFS default bootstrap peers
+	var bootstrapPeers []peer.AddrInfo
+	if testing.Testing() {
+		bootstrapPeers = []peer.AddrInfo{}
+		clientLogger.Infof("Test mode detected - using no bootstrap peers (isolated mode)")
+	} else {
+		bootstrapPeers = dht.GetDefaultBootstrapPeerAddrInfos()
+		clientLogger.Infof("Using %d default IPFS bootstrap peers", len(bootstrapPeers))
+	}
+
+	// Parse custom relay peers if provided
+	customRelayPeers := parseRelayPeersFromConfig(config.RelayPeers, clientLogger)
+
+	// Add custom relay peers to bootstrap list for better peer discovery
+	// This helps the DHT routing table include your known-good relay peers
+	if len(customRelayPeers) > 0 {
+		bootstrapPeers = append(bootstrapPeers, customRelayPeers...)
+		clientLogger.Infof("Added %d custom relay peers to bootstrap peer list", len(customRelayPeers))
+	}
+
+	// Determine which peers to use as relays (relay peers OR bootstrap peers as fallback)
+	relayPeers := selectRelayPeers(customRelayPeers, bootstrapPeers, clientLogger)
+	return bootstrapPeers, relayPeers
+}
+
 // Helper functions for NewClient
 
 func getLogger(configLogger logger) logger {
@@ -163,8 +189,60 @@ func getLogger(configLogger logger) logger {
 	return configLogger
 }
 
+// createPrivateIPConnectionGater creates a ConnectionGater that blocks private IP ranges.
+// Returns a configured BasicConnectionGater that prevents connections to/from:
+// - RFC1918 private networks (10.x, 172.16-31.x, 192.168.x)
+// - Link-local addresses (169.254.x, fe80::)
+// - Loopback addresses (127.x, ::1)
+// - Shared address space (100.64.x)
+// - IPv6 unique local addresses (fc00::)
+func createPrivateIPConnectionGater(log logger, cancel context.CancelFunc) (*conngater.BasicConnectionGater, error) {
+	ipFilter, err := conngater.NewBasicConnectionGater(nil)
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("failed to create connection gater: %w", err)
+	}
+
+	// Standard private IP ranges to block
+	privateRanges := []string{
+		"10.0.0.0/8",     // RFC1918 private network
+		"172.16.0.0/12",  // RFC1918 private network
+		"192.168.0.0/16", // RFC1918 private network
+		"127.0.0.0/8",    // Loopback
+		"169.254.0.0/16", // Link-local
+		"100.64.0.0/10",  // Shared Address Space (RFC6598)
+		"fc00::/7",       // IPv6 Unique Local Addresses
+		"fe80::/10",      // IPv6 Link-Local Addresses
+		"::1/128",        // IPv6 Loopback
+	}
+
+	for _, cidr := range privateRanges {
+		_, ipnet, err := net.ParseCIDR(cidr)
+		if err != nil {
+			cancel()
+			return nil, fmt.Errorf("failed to parse CIDR %s: %w", cidr, err)
+		}
+		if err := ipFilter.BlockSubnet(ipnet); err != nil {
+			log.Warnf("Failed to block subnet %s: %v", cidr, err)
+		}
+	}
+
+	return ipFilter, nil
+}
+
 func buildHostOptions(config Config, log logger, cancel context.CancelFunc) ([]libp2p.Option, error) {
 	hostOpts := []libp2p.Option{libp2p.Identity(config.PrivateKey)}
+
+	// Add connection gater to block private IPs if AllowPrivateIPs is false (default)
+	if !config.AllowPrivateIPs {
+		ipFilter, err := createPrivateIPConnectionGater(log, cancel)
+		if err != nil {
+			return nil, err
+		}
+
+		hostOpts = append(hostOpts, libp2p.ConnectionGater(ipFilter))
+		log.Infof("Private IP connection gater enabled (blocking RFC1918 and local addresses)")
+	}
 
 	// Configure announce addresses if provided (useful for K8s)
 	if len(config.AnnounceAddrs) > 0 {
@@ -195,14 +273,17 @@ func createHost(_ context.Context, hostOpts []libp2p.Option, config Config, rela
 		),
 	)
 
-	// Only enable NAT traversal features if not disabled
-	// NAT features can cause data races in tests due to libp2p's NAT manager using non-thread-safe global state
-	if !config.DisableNAT {
+	// Enable NAT features only if explicitly enabled
+	// UPnP/NAT-PMP scans the local gateway which triggers network scanning alerts
+	if config.EnableNAT {
 		hostOpts = append(hostOpts,
 			libp2p.NATPortMap(),
 			libp2p.EnableNATService(),
 			libp2p.EnableHolePunching(),
 		)
+		log.Infof("UPnP/NAT-PMP enabled (will scan local gateway for port mapping)")
+	} else {
+		log.Infof("UPnP/NAT-PMP disabled (production safe default)")
 	}
 
 	hostOpts = append(hostOpts,
@@ -280,33 +361,43 @@ func setupDHT(ctx context.Context, h host.Host, config Config, bootstrapPeers []
 	return kadDHT, nil
 }
 
-func configureRelayPeers(relayPeersConfig []string, bootstrapPeers []peer.AddrInfo, log logger) []peer.AddrInfo {
-	if len(relayPeersConfig) == 0 {
-		log.Infof("Using bootstrap peers as relays")
-		return bootstrapPeers
+// parseRelayPeersFromConfig parses relay peer multiaddr strings into AddrInfo
+func parseRelayPeersFromConfig(relayPeersConfig []string, log logger) []peer.AddrInfo {
+	return parsePeerMultiaddrs(relayPeersConfig, "relay", log)
+}
+
+// parsePeerMultiaddrs is a shared helper to parse peer multiaddr strings
+func parsePeerMultiaddrs(peerConfigs []string, peerType string, log logger) []peer.AddrInfo {
+	if len(peerConfigs) == 0 {
+		return nil
 	}
 
-	relayPeers := make([]peer.AddrInfo, 0, len(relayPeersConfig))
-	for _, relayStr := range relayPeersConfig {
-		maddr, err := multiaddr.NewMultiaddr(relayStr)
+	peers := make([]peer.AddrInfo, 0, len(peerConfigs))
+	for _, peerStr := range peerConfigs {
+		maddr, err := multiaddr.NewMultiaddr(peerStr)
 		if err != nil {
-			log.Errorf("Invalid relay address %s: %v (hint: use /dns4/ for hostnames, /ip4/ for IP addresses)", relayStr, err)
+			log.Errorf("Invalid %s address %s: %v (hint: use /dns4/ for hostnames, /ip4/ for IP addresses)", peerType, peerStr, err)
 			continue
 		}
 		addrInfo, err := peer.AddrInfoFromP2pAddr(maddr)
 		if err != nil {
-			log.Errorf("Invalid relay peer info %s: %v", relayStr, err)
+			log.Errorf("Invalid %s peer info %s: %v", peerType, peerStr, err)
 			continue
 		}
-		relayPeers = append(relayPeers, *addrInfo)
+		peers = append(peers, *addrInfo)
 	}
 
-	if len(relayPeers) > 0 {
-		log.Infof("Using %d custom relay peer(s)", len(relayPeers))
-		return relayPeers
+	return peers
+}
+
+// selectRelayPeers determines which peers to use as relays
+func selectRelayPeers(customRelayPeers []peer.AddrInfo, bootstrapPeers []peer.AddrInfo, log logger) []peer.AddrInfo {
+	if len(customRelayPeers) > 0 {
+		log.Infof("Using %d custom relay peer(s)", len(customRelayPeers))
+		return customRelayPeers
 	}
 
-	log.Warnf("No valid custom relay peers found, falling back to bootstrap peers as relays")
+	log.Infof("Using bootstrap peers as relays")
 	return bootstrapPeers
 }
 
@@ -630,15 +721,7 @@ func (c *client) connectToDiscoveredPeer(ctx context.Context, peerInfo peer.Addr
 		return
 	}
 
-	// Filter private IPs unless explicitly allowed (default: filter for production safety)
-	if !c.config.AllowPrivateIPs {
-		peerInfo.Addrs = filterPrivateAddrs(peerInfo.Addrs)
-		if len(peerInfo.Addrs) == 0 {
-			// All addresses were private, skip this peer
-			return
-		}
-	}
-
+	// ConnectionGater handles private IP filtering, so just try to connect
 	if err := c.host.Connect(ctx, peerInfo); err != nil {
 		if c.shouldLogConnectionError(err) {
 			c.logger.Debugf("Failed to connect to discovered peer %s: %v", peerInfo.ID.String(), err)

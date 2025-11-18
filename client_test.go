@@ -416,7 +416,8 @@ func TestConfigureRelayPeersEmpty(t *testing.T) {
 		{ID: "QmYyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N"},
 	}
 
-	relayPeers := configureRelayPeers([]string{}, bootstrapPeers, logger)
+	customRelayPeers := parseRelayPeersFromConfig([]string{}, logger)
+	relayPeers := selectRelayPeers(customRelayPeers, bootstrapPeers, logger)
 
 	// Should return bootstrap peers when no custom relays
 	assert.Equal(t, bootstrapPeers, relayPeers)
@@ -435,7 +436,8 @@ func TestConfigureRelayPeersInvalidAddresses(t *testing.T) {
 		"not-a-multiaddr",
 	}
 
-	relayPeers := configureRelayPeers(invalidRelays, bootstrapPeers, logger)
+	customRelayPeers := parseRelayPeersFromConfig(invalidRelays, logger)
+	relayPeers := selectRelayPeers(customRelayPeers, bootstrapPeers, logger)
 
 	// Should fall back to bootstrap peers on invalid addresses
 	assert.Equal(t, bootstrapPeers, relayPeers)
