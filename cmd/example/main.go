@@ -56,7 +56,6 @@ func main() {
 		PeerCacheFile: "peer_cache.json", // Enable peer persistence
 		RelayPeers:    relayPeers,
 		DHTMode:       "client",
-		//EnableNAT:     true,
 	})
 	if err != nil {
 		logger.Errorf("Failed to create P2P client: %v", err)

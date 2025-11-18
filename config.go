@@ -98,7 +98,6 @@ type Config struct {
 	// IMPORTANT: This triggers network scanning alerts on shared hosting (Hetzner, AWS, etc.).
 	// Only enable for local development behind a home router/NAT.
 	// Default: false (NAT features disabled for production safety)
-	// Note: Hole punching (relay-based NAT traversal) remains enabled and doesn't scan local network.
 	EnableNAT bool
 
 	// EnableMDNS enables multicast DNS peer discovery on the local network.

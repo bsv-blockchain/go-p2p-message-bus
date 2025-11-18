@@ -87,30 +87,7 @@ func NewClient(config Config) (Client, error) {
 		return nil, err
 	}
 
-	// Get bootstrap peers based on environment
-	// Test mode: empty list for fast, isolated tests
-	// Production: IPFS default bootstrap peers
-	var bootstrapPeers []peer.AddrInfo
-	if testing.Testing() {
-		bootstrapPeers = []peer.AddrInfo{}
-		clientLogger.Infof("Test mode detected - using no bootstrap peers (isolated mode)")
-	} else {
-		bootstrapPeers = dht.GetDefaultBootstrapPeerAddrInfos()
-		clientLogger.Infof("Using %d default IPFS bootstrap peers", len(bootstrapPeers))
-	}
-
-	// Parse custom relay peers if provided
-	customRelayPeers := parseRelayPeersFromConfig(config.RelayPeers, clientLogger)
-
-	// Add custom relay peers to bootstrap list for better peer discovery
-	// This helps the DHT routing table include your known-good relay peers
-	if len(customRelayPeers) > 0 {
-		bootstrapPeers = append(bootstrapPeers, customRelayPeers...)
-		clientLogger.Infof("Added %d custom relay peers to bootstrap peer list", len(customRelayPeers))
-	}
-
-	// Determine which peers to use as relays (relay peers OR bootstrap peers as fallback)
-	relayPeers := selectRelayPeers(customRelayPeers, bootstrapPeers, clientLogger)
+	bootstrapPeers, relayPeers := getBootstrapAndRelayPeers(config, clientLogger)
 
 	// Create and setup libp2p host
 	h, err := createHost(ctx, hostOpts, config, relayPeers, clientLogger, cancel)
@@ -171,6 +148,34 @@ func NewClient(config Config) (Client, error) {
 	go c.discoverPeers(ctx, routingDiscovery, true)
 
 	return c, nil
+}
+
+func getBootstrapAndRelayPeers(config Config, clientLogger logger) ([]peer.AddrInfo, []peer.AddrInfo) {
+	// Get bootstrap peers based on environment
+	// Test mode: empty list for fast, isolated tests
+	// Production: IPFS default bootstrap peers
+	var bootstrapPeers []peer.AddrInfo
+	if testing.Testing() {
+		bootstrapPeers = []peer.AddrInfo{}
+		clientLogger.Infof("Test mode detected - using no bootstrap peers (isolated mode)")
+	} else {
+		bootstrapPeers = dht.GetDefaultBootstrapPeerAddrInfos()
+		clientLogger.Infof("Using %d default IPFS bootstrap peers", len(bootstrapPeers))
+	}
+
+	// Parse custom relay peers if provided
+	customRelayPeers := parseRelayPeersFromConfig(config.RelayPeers, clientLogger)
+
+	// Add custom relay peers to bootstrap list for better peer discovery
+	// This helps the DHT routing table include your known-good relay peers
+	if len(customRelayPeers) > 0 {
+		bootstrapPeers = append(bootstrapPeers, customRelayPeers...)
+		clientLogger.Infof("Added %d custom relay peers to bootstrap peer list", len(customRelayPeers))
+	}
+
+	// Determine which peers to use as relays (relay peers OR bootstrap peers as fallback)
+	relayPeers := selectRelayPeers(customRelayPeers, bootstrapPeers, clientLogger)
+	return bootstrapPeers, relayPeers
 }
 
 // Helper functions for NewClient
@@ -402,7 +407,6 @@ func connectToBootstrapPeers(ctx context.Context, h host.Host, peers []peer.Addr
 			if connectErr := h.Connect(ctx, pi); connectErr == nil {
 				log.Infof("Connected to bootstrap peer: %s", pi.ID.String())
 			}
-			// Note: ConnectionGater silently blocks private IPs, no error logged here
 		}(peerInfo)
 	}
 }
@@ -419,7 +423,6 @@ func connectToRelayPeers(ctx context.Context, h host.Host, peers []peer.AddrInfo
 			} else {
 				log.Warnf("Failed to connect to relay peer %s: %v", pi.ID.String(), connectErr)
 			}
-			// Note: ConnectionGater silently blocks private IPs
 		}(relayPeer)
 	}
 }
@@ -971,7 +974,6 @@ func connectToCachedPeers(ctx context.Context, h host.Host, cachedPeers []cached
 			} else {
 				logger.Warnf("Failed to reconnect to cached peer %s [%s]: %v", name, ai.ID.String(), err)
 			}
-			// Note: ConnectionGater silently blocks private IPs
 		}(addrInfo, cp.Name)
 	}
 }
