@@ -89,8 +89,18 @@ func NewClient(config Config) (Client, error) {
 	// Get bootstrap peers from DHT library for DHT bootstrapping
 	bootstrapPeers := dht.GetDefaultBootstrapPeerAddrInfos()
 
-	// Determine which peers to use as relays
-	relayPeers := configureRelayPeers(config.RelayPeers, bootstrapPeers, clientLogger)
+	// Parse custom relay peers if provided
+	customRelayPeers := parseRelayPeersFromConfig(config.RelayPeers, clientLogger)
+
+	// Add custom relay peers to bootstrap list for better peer discovery
+	// This helps the DHT routing table include your known-good relay peers
+	if len(customRelayPeers) > 0 {
+		bootstrapPeers = append(bootstrapPeers, customRelayPeers...)
+		clientLogger.Infof("Added %d custom relay peers to bootstrap peer list", len(customRelayPeers))
+	}
+
+	// Determine which peers to use as relays (relay peers OR bootstrap peers as fallback)
+	relayPeers := selectRelayPeers(customRelayPeers, bootstrapPeers, clientLogger)
 
 	// Create and setup libp2p host
 	h, err := createHost(ctx, hostOpts, config, relayPeers, clientLogger, cancel)
@@ -333,10 +343,10 @@ func setupDHT(ctx context.Context, h host.Host, config Config, bootstrapPeers []
 	return kadDHT, nil
 }
 
-func configureRelayPeers(relayPeersConfig []string, bootstrapPeers []peer.AddrInfo, log logger) []peer.AddrInfo {
+// parseRelayPeersFromConfig parses relay peer multiaddr strings into AddrInfo
+func parseRelayPeersFromConfig(relayPeersConfig []string, log logger) []peer.AddrInfo {
 	if len(relayPeersConfig) == 0 {
-		log.Infof("Using bootstrap peers as relays")
-		return bootstrapPeers
+		return nil
 	}
 
 	relayPeers := make([]peer.AddrInfo, 0, len(relayPeersConfig))
@@ -354,12 +364,17 @@ func configureRelayPeers(relayPeersConfig []string, bootstrapPeers []peer.AddrIn
 		relayPeers = append(relayPeers, *addrInfo)
 	}
 
-	if len(relayPeers) > 0 {
-		log.Infof("Using %d custom relay peer(s)", len(relayPeers))
-		return relayPeers
+	return relayPeers
+}
+
+// selectRelayPeers determines which peers to use as relays
+func selectRelayPeers(customRelayPeers []peer.AddrInfo, bootstrapPeers []peer.AddrInfo, log logger) []peer.AddrInfo {
+	if len(customRelayPeers) > 0 {
+		log.Infof("Using %d custom relay peer(s)", len(customRelayPeers))
+		return customRelayPeers
 	}
 
-	log.Warnf("No valid custom relay peers found, falling back to bootstrap peers as relays")
+	log.Infof("Using bootstrap peers as relays")
 	return bootstrapPeers
 }
 
