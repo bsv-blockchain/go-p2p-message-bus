@@ -36,11 +36,6 @@ type Config struct {
 	// so other peers can identify the sender.
 	Name string
 
-	// BootstrapPeers is an optional list of multiaddr strings for initial peers to connect to.
-	// If not provided, the client will use libp2p's default bootstrap peers.
-	// Example: []string{"/ip4/192.168.1.100/tcp/4001/p2p/QmPeerID"}
-	BootstrapPeers []string
-
 	// Logger is an optional logger to use for logging. If not provided, the client will use
 	// DefaultLogger. Set to a custom implementation to integrate with your logging framework.
 	Logger logger

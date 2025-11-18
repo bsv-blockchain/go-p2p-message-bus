@@ -358,26 +358,31 @@ func setupDHT(ctx context.Context, h host.Host, config Config, bootstrapPeers []
 
 // parseRelayPeersFromConfig parses relay peer multiaddr strings into AddrInfo
 func parseRelayPeersFromConfig(relayPeersConfig []string, log logger) []peer.AddrInfo {
-	if len(relayPeersConfig) == 0 {
+	return parsePeerMultiaddrs(relayPeersConfig, "relay", log)
+}
+
+// parsePeerMultiaddrs is a shared helper to parse peer multiaddr strings
+func parsePeerMultiaddrs(peerConfigs []string, peerType string, log logger) []peer.AddrInfo {
+	if len(peerConfigs) == 0 {
 		return nil
 	}
 
-	relayPeers := make([]peer.AddrInfo, 0, len(relayPeersConfig))
-	for _, relayStr := range relayPeersConfig {
-		maddr, err := multiaddr.NewMultiaddr(relayStr)
+	peers := make([]peer.AddrInfo, 0, len(peerConfigs))
+	for _, peerStr := range peerConfigs {
+		maddr, err := multiaddr.NewMultiaddr(peerStr)
 		if err != nil {
-			log.Errorf("Invalid relay address %s: %v (hint: use /dns4/ for hostnames, /ip4/ for IP addresses)", relayStr, err)
+			log.Errorf("Invalid %s address %s: %v (hint: use /dns4/ for hostnames, /ip4/ for IP addresses)", peerType, peerStr, err)
 			continue
 		}
 		addrInfo, err := peer.AddrInfoFromP2pAddr(maddr)
 		if err != nil {
-			log.Errorf("Invalid relay peer info %s: %v", relayStr, err)
+			log.Errorf("Invalid %s peer info %s: %v", peerType, peerStr, err)
 			continue
 		}
-		relayPeers = append(relayPeers, *addrInfo)
+		peers = append(peers, *addrInfo)
 	}
 
-	return relayPeers
+	return peers
 }
 
 // selectRelayPeers determines which peers to use as relays
