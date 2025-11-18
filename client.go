@@ -32,6 +32,7 @@ import (
 	"github.com/libp2p/go-libp2p/p2p/discovery/mdns"
 	drouting "github.com/libp2p/go-libp2p/p2p/discovery/routing"
 	"github.com/libp2p/go-libp2p/p2p/net/conngater"
+	"github.com/libp2p/go-libp2p/p2p/transport/tcp"
 	"github.com/multiformats/go-multiaddr"
 	manet "github.com/multiformats/go-multiaddr/net"
 )
@@ -231,6 +232,12 @@ func createPrivateIPConnectionGater(log logger, cancel context.CancelFunc) (*con
 
 func buildHostOptions(config Config, log logger, cancel context.CancelFunc) ([]libp2p.Option, error) {
 	hostOpts := []libp2p.Option{libp2p.Identity(config.PrivateKey)}
+
+	// Explicitly configure only TCP transport to prevent WebRTC's mDNS usage
+	// WebRTC transport uses mDNS (port 5353) for ICE candidate discovery
+	// By only enabling TCP, we avoid any unwanted mDNS traffic
+	hostOpts = append(hostOpts, libp2p.Transport(tcp.NewTCPTransport))
+	log.Infof("Configured TCP-only transport (WebRTC disabled to prevent mDNS)")
 
 	// Add connection gater to block private IPs if AllowPrivateIPs is false (default)
 	if !config.AllowPrivateIPs {
