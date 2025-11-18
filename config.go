@@ -117,4 +117,22 @@ type Config struct {
 	// Default: false (private IPs filtered for production safety)
 	// Set to true only for local development or private network deployments
 	AllowPrivateIPs bool
+
+	// MaxConnections is the high water mark for total peer connections.
+	// When this limit is reached, the connection manager will prune low-value connections
+	// (DHT routing peers) while protecting high-value peers (topic mesh peers).
+	// If not provided or zero, defaults to 35.
+	// Recommended: 25-50 depending on available bandwidth and number of topics.
+	MaxConnections int
+
+	// MinConnections is the low water mark for total peer connections.
+	// The connection manager will not prune connections below this threshold.
+	// If not provided or zero, defaults to 25.
+	// Recommended: Set to MaxConnections - 10 for a reasonable buffer.
+	MinConnections int
+
+	// ConnectionGracePeriod is the duration new connections are protected from pruning.
+	// This prevents rapid connect/disconnect cycles.
+	// If not provided or zero, defaults to 20 seconds.
+	ConnectionGracePeriod time.Duration
 }

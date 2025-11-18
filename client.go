@@ -32,6 +32,8 @@ import (
 	"github.com/libp2p/go-libp2p/p2p/discovery/mdns"
 	drouting "github.com/libp2p/go-libp2p/p2p/discovery/routing"
 	"github.com/libp2p/go-libp2p/p2p/net/conngater"
+	"github.com/libp2p/go-libp2p/p2p/net/connmgr"
+	"github.com/libp2p/go-libp2p/p2p/transport/tcp"
 	"github.com/multiformats/go-multiaddr"
 	manet "github.com/multiformats/go-multiaddr/net"
 )
@@ -231,6 +233,39 @@ func createPrivateIPConnectionGater(log logger, cancel context.CancelFunc) (*con
 
 func buildHostOptions(config Config, log logger, cancel context.CancelFunc) ([]libp2p.Option, error) {
 	hostOpts := []libp2p.Option{libp2p.Identity(config.PrivateKey)}
+
+	// Explicitly configure only TCP transport to prevent WebRTC's mDNS usage
+	// WebRTC transport uses mDNS (port 5353) for ICE candidate discovery
+	// By only enabling TCP, we avoid any unwanted mDNS traffic
+	hostOpts = append(hostOpts, libp2p.Transport(tcp.NewTCPTransport))
+	log.Infof("Configured TCP-only transport (WebRTC disabled to prevent mDNS)")
+
+	// Configure connection manager to limit total connections
+	maxConns := config.MaxConnections
+	if maxConns == 0 {
+		maxConns = 35 // Default high water mark
+	}
+	minConns := config.MinConnections
+	if minConns == 0 {
+		minConns = 25 // Default low water mark
+	}
+	gracePeriod := config.ConnectionGracePeriod
+	if gracePeriod == 0 {
+		gracePeriod = 20 * time.Second // Default grace period
+	}
+
+	connMgr, err := connmgr.NewConnManager(
+		minConns,
+		maxConns,
+		connmgr.WithGracePeriod(gracePeriod),
+	)
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("failed to create connection manager: %w", err)
+	}
+
+	hostOpts = append(hostOpts, libp2p.ConnectionManager(connMgr))
+	log.Infof("Connection manager configured: min=%d, max=%d, grace=%v", minConns, maxConns, gracePeriod)
 
 	// Add connection gater to block private IPs if AllowPrivateIPs is false (default)
 	if !config.AllowPrivateIPs {
@@ -494,6 +529,10 @@ func (c *client) Subscribe(topic string) <-chan Message {
 					peerID := conn.RemotePeer()
 					topicPeers := t.ListPeers()
 					if slices.Contains(topicPeers, peerID) {
+						// Tag topic peers with high value to protect from connection manager pruning
+						c.host.ConnManager().TagPeer(peerID, fmt.Sprintf("topic:%s", topic), 100)
+						c.logger.Debugf("Tagged topic peer %s for protection", peerID)
+
 						name := c.peerTracker.getName(peerID)
 						addr := conn.RemoteMultiaddr().String()
 						c.logger.Infof("[CONNECTED] Topic peer %s [%s] %s", peerID.String(), name, addr)
@@ -507,6 +546,8 @@ func (c *client) Subscribe(topic string) <-chan Message {
 				peerID := conn.RemotePeer()
 				topicPeers := t.ListPeers()
 				if slices.Contains(topicPeers, peerID) {
+					// Untag peer when they disconnect from topic
+					c.host.ConnManager().UntagPeer(peerID, fmt.Sprintf("topic:%s", topic))
 					c.logger.Infof("[DISCONNECTED] Lost connection to topic peer %s", peerID.String()[:16])
 				}
 			},
