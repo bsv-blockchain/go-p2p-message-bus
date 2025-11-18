@@ -258,14 +258,17 @@ func createHost(_ context.Context, hostOpts []libp2p.Option, config Config, rela
 		),
 	)
 
-	// Only enable NAT traversal features if not disabled
-	// NAT features can cause data races in tests due to libp2p's NAT manager using non-thread-safe global state
-	if !config.DisableNAT {
+	// Enable NAT features only if explicitly enabled
+	// UPnP/NAT-PMP scans the local gateway which triggers network scanning alerts
+	if config.EnableNAT {
 		hostOpts = append(hostOpts,
 			libp2p.NATPortMap(),
 			libp2p.EnableNATService(),
 			libp2p.EnableHolePunching(),
 		)
+		log.Infof("UPnP/NAT-PMP enabled (will scan local gateway for port mapping)")
+	} else {
+		log.Infof("UPnP/NAT-PMP disabled (production safe default)")
 	}
 
 	hostOpts = append(hostOpts,
