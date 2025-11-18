@@ -99,6 +99,7 @@
 - **Auto-discovery**: Automatic peer discovery via DHT, mDNS, and peer caching
 - **NAT traversal**: Built-in support for hole punching and relay connections
 - **Persistent peers**: Automatically caches and reconnects to known peers
+- **Connection limiting**: Smart connection manager prioritizes topic peers over routing peers (default: 25-35 connections)
 
 <br/>
 
