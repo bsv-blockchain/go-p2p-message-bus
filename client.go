@@ -28,6 +28,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/p2p/discovery/mdns"
 	drouting "github.com/libp2p/go-libp2p/p2p/discovery/routing"
+	"github.com/libp2p/go-libp2p/p2p/net/conngater"
 	"github.com/multiformats/go-multiaddr"
 	manet "github.com/multiformats/go-multiaddr/net"
 
@@ -163,8 +164,60 @@ func getLogger(configLogger logger) logger {
 	return configLogger
 }
 
+// createPrivateIPConnectionGater creates a ConnectionGater that blocks private IP ranges.
+// Returns a configured BasicConnectionGater that prevents connections to/from:
+// - RFC1918 private networks (10.x, 172.16-31.x, 192.168.x)
+// - Link-local addresses (169.254.x, fe80::)
+// - Loopback addresses (127.x, ::1)
+// - Shared address space (100.64.x)
+// - IPv6 unique local addresses (fc00::)
+func createPrivateIPConnectionGater(log logger, cancel context.CancelFunc) (*conngater.BasicConnectionGater, error) {
+	ipFilter, err := conngater.NewBasicConnectionGater(nil)
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("failed to create connection gater: %w", err)
+	}
+
+	// Standard private IP ranges to block
+	privateRanges := []string{
+		"10.0.0.0/8",     // RFC1918 private network
+		"172.16.0.0/12",  // RFC1918 private network
+		"192.168.0.0/16", // RFC1918 private network
+		"127.0.0.0/8",    // Loopback
+		"169.254.0.0/16", // Link-local
+		"100.64.0.0/10",  // Shared Address Space (RFC6598)
+		"fc00::/7",       // IPv6 Unique Local Addresses
+		"fe80::/10",      // IPv6 Link-Local Addresses
+		"::1/128",        // IPv6 Loopback
+	}
+
+	for _, cidr := range privateRanges {
+		_, ipnet, err := net.ParseCIDR(cidr)
+		if err != nil {
+			cancel()
+			return nil, fmt.Errorf("failed to parse CIDR %s: %w", cidr, err)
+		}
+		if err := ipFilter.BlockSubnet(ipnet); err != nil {
+			log.Warnf("Failed to block subnet %s: %v", cidr, err)
+		}
+	}
+
+	return ipFilter, nil
+}
+
 func buildHostOptions(config Config, log logger, cancel context.CancelFunc) ([]libp2p.Option, error) {
 	hostOpts := []libp2p.Option{libp2p.Identity(config.PrivateKey)}
+
+	// Add connection gater to block private IPs if AllowPrivateIPs is false (default)
+	if !config.AllowPrivateIPs {
+		ipFilter, err := createPrivateIPConnectionGater(log, cancel)
+		if err != nil {
+			return nil, err
+		}
+
+		hostOpts = append(hostOpts, libp2p.ConnectionGater(ipFilter))
+		log.Infof("Private IP connection gater enabled (blocking RFC1918 and local addresses)")
+	}
 
 	// Configure announce addresses if provided (useful for K8s)
 	if len(config.AnnounceAddrs) > 0 {
@@ -316,6 +369,7 @@ func connectToBootstrapPeers(ctx context.Context, h host.Host, peers []peer.Addr
 			if connectErr := h.Connect(ctx, pi); connectErr == nil {
 				log.Infof("Connected to bootstrap peer: %s", pi.ID.String())
 			}
+			// Note: ConnectionGater silently blocks private IPs, no error logged here
 		}(peerInfo)
 	}
 }
@@ -332,6 +386,7 @@ func connectToRelayPeers(ctx context.Context, h host.Host, peers []peer.AddrInfo
 			} else {
 				log.Warnf("Failed to connect to relay peer %s: %v", pi.ID.String(), connectErr)
 			}
+			// Note: ConnectionGater silently blocks private IPs
 		}(relayPeer)
 	}
 }
@@ -630,15 +685,7 @@ func (c *client) connectToDiscoveredPeer(ctx context.Context, peerInfo peer.Addr
 		return
 	}
 
-	// Filter private IPs unless explicitly allowed (default: filter for production safety)
-	if !c.config.AllowPrivateIPs {
-		peerInfo.Addrs = filterPrivateAddrs(peerInfo.Addrs)
-		if len(peerInfo.Addrs) == 0 {
-			// All addresses were private, skip this peer
-			return
-		}
-	}
-
+	// ConnectionGater handles private IP filtering, so just try to connect
 	if err := c.host.Connect(ctx, peerInfo); err != nil {
 		if c.shouldLogConnectionError(err) {
 			c.logger.Debugf("Failed to connect to discovered peer %s: %v", peerInfo.ID.String(), err)
@@ -891,6 +938,7 @@ func connectToCachedPeers(ctx context.Context, h host.Host, cachedPeers []cached
 			} else {
 				logger.Warnf("Failed to reconnect to cached peer %s [%s]: %v", name, ai.ID.String(), err)
 			}
+			// Note: ConnectionGater silently blocks private IPs
 		}(addrInfo, cp.Name)
 	}
 }
