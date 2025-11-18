@@ -19,6 +19,8 @@ import (
 	"testing"
 	"time"
 
+	ds "github.com/ipfs/go-datastore"
+	dssync "github.com/ipfs/go-datastore/sync"
 	"github.com/libp2p/go-libp2p"
 	dht "github.com/libp2p/go-libp2p-kad-dht"
 	"github.com/libp2p/go-libp2p-kad-dht/records"
@@ -32,9 +34,6 @@ import (
 	"github.com/libp2p/go-libp2p/p2p/net/conngater"
 	"github.com/multiformats/go-multiaddr"
 	manet "github.com/multiformats/go-multiaddr/net"
-
-	ds "github.com/ipfs/go-datastore"
-	dssync "github.com/ipfs/go-datastore/sync"
 )
 
 var (
@@ -391,7 +390,7 @@ func parsePeerMultiaddrs(peerConfigs []string, peerType string, log logger) []pe
 }
 
 // selectRelayPeers determines which peers to use as relays
-func selectRelayPeers(customRelayPeers []peer.AddrInfo, bootstrapPeers []peer.AddrInfo, log logger) []peer.AddrInfo {
+func selectRelayPeers(customRelayPeers, bootstrapPeers []peer.AddrInfo, log logger) []peer.AddrInfo {
 	if len(customRelayPeers) > 0 {
 		log.Infof("Using %d custom relay peer(s)", len(customRelayPeers))
 		return customRelayPeers

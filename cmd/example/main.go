@@ -12,8 +12,9 @@ import (
 	"syscall"
 	"time"
 
-	p2p "github.com/bsv-blockchain/go-p2p-message-bus"
 	"github.com/libp2p/go-libp2p/core/crypto"
+
+	p2p "github.com/bsv-blockchain/go-p2p-message-bus"
 )
 
 func main() {
