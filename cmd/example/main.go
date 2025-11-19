@@ -14,7 +14,7 @@ import (
 
 	"github.com/libp2p/go-libp2p/core/crypto"
 
-	p2p "github.com/bsv-blockchain/go-p2p-message-bus"
+	"github.com/bsv-blockchain/go-p2p-message-bus"
 )
 
 func main() {
@@ -24,7 +24,9 @@ func main() {
 	port := flag.Int("port", 0, "port to listen on (0 for random)")
 	noBroadcast := flag.Bool("no-broadcast", false, "Disable message broadcasting")
 	prettyJSON := flag.Bool("pretty-json", false, "Pretty print JSON messages")
-	relays := flag.String("relays", "", "Comma-separated list of relay peer multiaddrs (e.g., /ip4/1.2.3.4/tcp/4001/p2p/PeerID)")
+	bootstrap := flag.String("bootstrap", "", "Comma-separated list of bootstrap peer multiaddrs (e.g., /ip4/1.2.3.4/tcp/4001/p2p/PeerID)")
+	dhtMode := flag.String("dht-mode", "client", "DHT mode: server, client, or off (off = topic-only, no DHT crawling)")
+	peerCache := flag.String("peer-cache", "", "Path to peer cache file for persistence (empty = disabled)")
 
 	flag.Parse()
 
@@ -45,18 +47,18 @@ func main() {
 		return
 	}
 
-	// Parse relay peers list
-	relayPeers := parseRelayPeers(*relays)
+	// Parse bootstrap peers list
+	bootstrapPeers := parseBootstrapPeers(*bootstrap)
 
 	// Create P2P client
 	client, err := p2p.NewClient(p2p.Config{
-		Name:          *name,
-		Logger:        logger,
-		PrivateKey:    privKey,
-		Port:          *port,
-		PeerCacheFile: "peer_cache.json", // Enable peer persistence
-		RelayPeers:    relayPeers,
-		DHTMode:       "client",
+		Name:           *name,
+		Logger:         logger,
+		PrivateKey:     privKey,
+		Port:           *port,
+		PeerCacheFile:  *peerCache,
+		BootstrapPeers: bootstrapPeers,
+		DHTMode:        *dhtMode,
 	})
 	if err != nil {
 		logger.Errorf("Failed to create P2P client: %v", err)
@@ -116,17 +118,17 @@ func getOrGeneratePrivateKey(keyHex string, logger *p2p.DefaultLogger) (crypto.P
 	return p2p.PrivateKeyFromHex(keyHex)
 }
 
-func parseRelayPeers(relays string) []string {
-	if relays == "" {
+func parseBootstrapPeers(bootstrap string) []string {
+	if bootstrap == "" {
 		return nil
 	}
 
-	parts := strings.Split(relays, ",")
-	relayPeers := make([]string, 0, len(parts))
-	for _, r := range parts {
-		relayPeers = append(relayPeers, strings.TrimSpace(r))
+	parts := strings.Split(bootstrap, ",")
+	bootstrapPeers := make([]string, 0, len(parts))
+	for _, b := range parts {
+		bootstrapPeers = append(bootstrapPeers, strings.TrimSpace(b))
 	}
-	return relayPeers
+	return bootstrapPeers
 }
 
 func parseTopics(topics string) []string {

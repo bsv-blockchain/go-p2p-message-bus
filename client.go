@@ -29,13 +29,19 @@ import (
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/libp2p/go-libp2p/core/peerstore"
+	"github.com/libp2p/go-libp2p/core/protocol"
 	"github.com/libp2p/go-libp2p/p2p/discovery/mdns"
 	drouting "github.com/libp2p/go-libp2p/p2p/discovery/routing"
 	"github.com/libp2p/go-libp2p/p2p/net/conngater"
 	"github.com/libp2p/go-libp2p/p2p/net/connmgr"
 	"github.com/libp2p/go-libp2p/p2p/transport/tcp"
 	"github.com/multiformats/go-multiaddr"
-	manet "github.com/multiformats/go-multiaddr/net"
+)
+
+const (
+	// peerAddressRequestProtocol is the protocol ID for requesting peer addresses
+	peerAddressRequestProtocol = "/p2p-msg-bus/peer-addr-request/1.0.0"
 )
 
 var (
@@ -67,6 +73,8 @@ type client struct {
 
 // NewClient creates and initializes a new P2P client.
 // It automatically starts the client and begins peer discovery.
+//
+//nolint:gocyclo // Initialization complexity is acceptable for setup function
 func NewClient(config Config) (Client, error) {
 	if config.Name == "" {
 		return nil, ErrNameRequired
@@ -96,15 +104,20 @@ func NewClient(config Config) (Client, error) {
 		return nil, err
 	}
 
-	// Set up DHT
-	kadDHT, err := setupDHT(ctx, h, config, bootstrapPeers, clientLogger, cancel)
-	if err != nil {
-		return nil, err
+	// Set up DHT (unless mode is "off")
+	var kadDHT *dht.IpfsDHT
+	if config.DHTMode == "off" {
+		clientLogger.Infof("DHT mode: off (topic-only network, no DHT peer discovery)")
+	} else {
+		var dhtErr error
+		kadDHT, dhtErr = setupDHT(ctx, h, config, bootstrapPeers, clientLogger, cancel)
+		if dhtErr != nil {
+			return nil, dhtErr
+		}
 	}
 
-	// Connect to various peer types
+	// Connect to bootstrap peers (which are also used as relay peers)
 	connectToBootstrapPeers(ctx, h, bootstrapPeers, clientLogger)
-	connectToRelayPeers(ctx, h, relayPeers, len(config.RelayPeers) > 0, clientLogger)
 	loadAndConnectCachedPeers(ctx, h, config, clientLogger)
 
 	// Create pubsub
@@ -143,40 +156,47 @@ func NewClient(config Config) (Client, error) {
 		logger:      clientLogger,
 	}
 
-	// Start DHT discovery
-	routingDiscovery := drouting.NewRoutingDiscovery(kadDHT)
-	go c.waitForDHTAndAdvertise(ctx, routingDiscovery)
-	go c.discoverPeers(ctx, routingDiscovery, true)
+	// Set up peer address request/response protocol handler
+	// This allows other peers to request addresses from us (useful for DHT-off clients)
+	h.SetStreamHandler(protocol.ID(peerAddressRequestProtocol), c.handlePeerAddressRequest)
+	clientLogger.Infof("Peer address request protocol handler installed")
+
+	// Start DHT discovery (only if DHT is enabled)
+	if kadDHT != nil {
+		routingDiscovery := drouting.NewRoutingDiscovery(kadDHT)
+		go c.waitForDHTAndAdvertise(ctx, routingDiscovery)
+		go c.discoverPeers(ctx, routingDiscovery, true)
+	} else {
+		clientLogger.Infof("Skipping DHT discovery - peer discovery will happen via GossipSub topic mesh only")
+		clientLogger.Infof("Topic peer exchange enabled - will attempt direct connections to discovered peers")
+		// Periodically check for new peer addresses learned via PX
+		go c.attemptDirectConnectionsToTopicPeers(ctx)
+	}
 
 	return c, nil
 }
 
 func getBootstrapAndRelayPeers(config Config, clientLogger logger) ([]peer.AddrInfo, []peer.AddrInfo) {
-	// Get bootstrap peers based on environment
-	// Test mode: empty list for fast, isolated tests
-	// Production: IPFS default bootstrap peers
+	// Get bootstrap peers based on environment and configuration
 	var bootstrapPeers []peer.AddrInfo
+
 	if testing.Testing() {
+		// Test mode: empty list for fast, isolated tests
 		bootstrapPeers = []peer.AddrInfo{}
 		clientLogger.Infof("Test mode detected - using no bootstrap peers (isolated mode)")
+	} else if len(config.BootstrapPeers) > 0 {
+		// Custom bootstrap peers provided - use them
+		bootstrapPeers = parsePeerMultiaddrs(config.BootstrapPeers, clientLogger)
+		clientLogger.Infof("Using %d custom bootstrap peer(s)", len(bootstrapPeers))
 	} else {
+		// No custom peers - use default IPFS bootstrap peers
 		bootstrapPeers = dht.GetDefaultBootstrapPeerAddrInfos()
 		clientLogger.Infof("Using %d default IPFS bootstrap peers", len(bootstrapPeers))
 	}
 
-	// Parse custom relay peers if provided
-	customRelayPeers := parseRelayPeersFromConfig(config.RelayPeers, clientLogger)
-
-	// Add custom relay peers to bootstrap list for better peer discovery
-	// This helps the DHT routing table include your known-good relay peers
-	if len(customRelayPeers) > 0 {
-		bootstrapPeers = append(bootstrapPeers, customRelayPeers...)
-		clientLogger.Infof("Added %d custom relay peers to bootstrap peer list", len(customRelayPeers))
-	}
-
-	// Determine which peers to use as relays (relay peers OR bootstrap peers as fallback)
-	relayPeers := selectRelayPeers(customRelayPeers, bootstrapPeers, clientLogger)
-	return bootstrapPeers, relayPeers
+	// Use the same bootstrap peers as relay peers
+	clientLogger.Infof("Using bootstrap peers as relay peers")
+	return bootstrapPeers, bootstrapPeers
 }
 
 // Helper functions for NewClient
@@ -395,13 +415,8 @@ func setupDHT(ctx context.Context, h host.Host, config Config, bootstrapPeers []
 	return kadDHT, nil
 }
 
-// parseRelayPeersFromConfig parses relay peer multiaddr strings into AddrInfo
-func parseRelayPeersFromConfig(relayPeersConfig []string, log logger) []peer.AddrInfo {
-	return parsePeerMultiaddrs(relayPeersConfig, "relay", log)
-}
-
-// parsePeerMultiaddrs is a shared helper to parse peer multiaddr strings
-func parsePeerMultiaddrs(peerConfigs []string, peerType string, log logger) []peer.AddrInfo {
+// parsePeerMultiaddrs is a shared helper to parse bootstrap peer multiaddr strings
+func parsePeerMultiaddrs(peerConfigs []string, log logger) []peer.AddrInfo {
 	if len(peerConfigs) == 0 {
 		return nil
 	}
@@ -410,29 +425,18 @@ func parsePeerMultiaddrs(peerConfigs []string, peerType string, log logger) []pe
 	for _, peerStr := range peerConfigs {
 		maddr, err := multiaddr.NewMultiaddr(peerStr)
 		if err != nil {
-			log.Errorf("Invalid %s address %s: %v (hint: use /dns4/ for hostnames, /ip4/ for IP addresses)", peerType, peerStr, err)
+			log.Errorf("Invalid bootstrap address %s: %v (hint: use /dns4/ for hostnames, /ip4/ for IP addresses)", peerStr, err)
 			continue
 		}
 		addrInfo, err := peer.AddrInfoFromP2pAddr(maddr)
 		if err != nil {
-			log.Errorf("Invalid %s peer info %s: %v", peerType, peerStr, err)
+			log.Errorf("Invalid bootstrap peer info %s: %v", peerStr, err)
 			continue
 		}
 		peers = append(peers, *addrInfo)
 	}
 
 	return peers
-}
-
-// selectRelayPeers determines which peers to use as relays
-func selectRelayPeers(customRelayPeers, bootstrapPeers []peer.AddrInfo, log logger) []peer.AddrInfo {
-	if len(customRelayPeers) > 0 {
-		log.Infof("Using %d custom relay peer(s)", len(customRelayPeers))
-		return customRelayPeers
-	}
-
-	log.Infof("Using bootstrap peers as relays")
-	return bootstrapPeers
 }
 
 func connectToBootstrapPeers(ctx context.Context, h host.Host, peers []peer.AddrInfo, log logger) {
@@ -442,22 +446,6 @@ func connectToBootstrapPeers(ctx context.Context, h host.Host, peers []peer.Addr
 				log.Infof("Connected to bootstrap peer: %s", pi.ID.String())
 			}
 		}(peerInfo)
-	}
-}
-
-func connectToRelayPeers(ctx context.Context, h host.Host, peers []peer.AddrInfo, hasCustomRelays bool, log logger) {
-	if !hasCustomRelays {
-		return
-	}
-
-	for _, relayPeer := range peers {
-		go func(pi peer.AddrInfo) {
-			if connectErr := h.Connect(ctx, pi); connectErr == nil {
-				log.Infof("Connected to relay peer: %s", pi.ID.String())
-			} else {
-				log.Warnf("Failed to connect to relay peer %s: %v", pi.ID.String(), connectErr)
-			}
-		}(relayPeer)
 	}
 }
 
@@ -649,7 +637,9 @@ func (c *client) Close() error {
 		if c.mdnsService != nil {
 			_ = c.mdnsService.Close()
 		}
-		_ = c.dht.Close()
+		if c.dht != nil {
+			_ = c.dht.Close()
+		}
 		_ = c.host.Close()
 		close(done)
 	}()
@@ -665,6 +655,7 @@ func (c *client) Close() error {
 
 // Internal methods
 
+//nolint:gocyclo // DHT advertising logic complexity is reasonable
 func (c *client) waitForDHTAndAdvertise(ctx context.Context, routingDiscovery *drouting.RoutingDiscovery) {
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
@@ -675,10 +666,14 @@ func (c *client) waitForDHTAndAdvertise(ctx context.Context, routingDiscovery *d
 		case <-ctx.Done():
 			return
 		case <-timeout:
-			c.logger.Infof("Timeout waiting for DHT peers - will rely on mDNS and peer cache")
+			if c.config.EnableMDNS {
+				c.logger.Infof("Timeout waiting for DHT peers - will rely on mDNS and peer cache")
+			} else {
+				c.logger.Infof("Timeout waiting for DHT peers - will rely on peer cache")
+			}
 			return
 		case <-ticker.C:
-			if len(c.dht.RoutingTable().ListPeers()) > 0 {
+			if c.dht != nil && len(c.dht.RoutingTable().ListPeers()) > 0 {
 				// Advertise on DHT for all topics
 				c.mu.RLock()
 				topicsCopy := make([]string, 0, len(c.topics))
@@ -787,6 +782,96 @@ func (c *client) shouldLogConnectionError(err error) bool {
 	return true
 }
 
+// attemptDirectConnectionsToTopicPeers periodically queries connected peers for
+// addresses of topic peers we're not directly connected to.
+// This implements a simple peer address exchange by asking bootstrap servers for peer info.
+func (c *client) attemptDirectConnectionsToTopicPeers(ctx context.Context) {
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+
+	// Track peers we've already requested to avoid spam
+	requested := make(map[peer.ID]bool)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			allTopicPeers := c.peerTracker.getAllTopicPeers()
+			c.logger.Debugf("Scanning %d topic peers for address discovery", len(allTopicPeers))
+
+			for _, targetPeer := range allTopicPeers {
+				// Skip if already connected directly
+				if c.host.Network().Connectedness(targetPeer) == network.Connected {
+					continue
+				}
+
+				// Skip if already requested
+				if requested[targetPeer] {
+					continue
+				}
+
+				// Request addresses from connected peers
+				go c.requestPeerAddresses(targetPeer)
+				requested[targetPeer] = true
+			}
+		}
+	}
+}
+
+// tryConnectToTopicPeer attempts to establish a direct connection to a topic peer
+// using addresses from the peerstore. This is used when DHT is disabled to implement
+// a lightweight peer exchange mechanism for topic peers.
+//
+// This only works for peers whose addresses are already in the peerstore.
+// Without DHT, addresses come from:
+// - Direct connections (bootstrap peers)
+// - Identify protocol exchanges
+// - GossipSub Peer Exchange (PX)
+// - Peer cache
+//
+// For best results with DHT disabled, include all known bootstrap servers in BootstrapPeers.
+func (c *client) tryConnectToTopicPeer(peerID peer.ID) {
+	// Check if we're already connected
+	if c.host.Network().Connectedness(peerID) == network.Connected {
+		return
+	}
+
+	// Get peer addresses from peerstore
+	addrs := c.host.Peerstore().Addrs(peerID)
+
+	peerName := c.peerTracker.getName(peerID)
+	c.logger.Debugf("Peer %s (%s): %d addresses in peerstore", peerName, peerID.String()[:16], len(addrs))
+
+	if len(addrs) == 0 {
+		// No addresses available - this peer is either:
+		// 1. Behind NAT with no public address (relay-only)
+		// 2. Not in our bootstrap list and not yet discovered via PX
+		// Messages still flow via GossipSub relay through connected peers
+		c.logger.Debugf("No addresses for peer %s - continuing via relay", peerName)
+		return
+	}
+
+	// Log the addresses we have
+	for i, addr := range addrs {
+		c.logger.Debugf("  Address %d: %s", i+1, addr.String())
+	}
+
+	// Attempt connection (ConnectionGater will handle private IP filtering)
+	peerInfo := peer.AddrInfo{
+		ID:    peerID,
+		Addrs: addrs,
+	}
+
+	if err := c.host.Connect(c.ctx, peerInfo); err != nil {
+		if c.shouldLogConnectionError(err) {
+			c.logger.Debugf("Failed to establish direct connection to topic peer %s: %v", peerID.String()[:16], err)
+		}
+	} else {
+		c.logger.Infof("Established direct connection to topic peer %s (%s)", c.peerTracker.getName(peerID), peerID.String()[:16])
+	}
+}
+
 func (c *client) receiveMessages(sub *pubsub.Subscription, topic *pubsub.Topic, msgChan chan Message) {
 	for {
 		msg, err := sub.Next(c.ctx)
@@ -878,6 +963,150 @@ func (c *client) savePeerCache() {
 	if len(cachedPeers) > 0 {
 		savePeerCache(cachedPeers, c.config.PeerCacheFile, c.logger)
 	}
+}
+
+// requestPeerAddresses asks connected peers if they know addresses for a target peer
+func (c *client) requestPeerAddresses(targetPeerID peer.ID) {
+	peerName := c.peerTracker.getName(targetPeerID)
+
+	// Get all directly connected peers
+	connectedPeers := c.host.Network().Peers()
+
+	c.logger.Debugf("Requesting addresses for peer %s from %d connected peers", peerName, len(connectedPeers))
+
+	for _, connectedPeer := range connectedPeers {
+		// Skip self
+		if connectedPeer == c.host.ID() {
+			continue
+		}
+
+		// Open stream to request peer addresses
+		stream, err := c.host.NewStream(c.ctx, connectedPeer, protocol.ID(peerAddressRequestProtocol))
+		if err != nil {
+			// Only log if it's not a "protocol not supported" error
+			if !strings.Contains(err.Error(), "protocols not supported") {
+				c.logger.Debugf("Failed to open peer-addr-request stream to %s: %v", connectedPeer.String()[:16], err)
+			}
+			continue
+		}
+
+		// Send the peer ID we're looking for
+		_, err = stream.Write([]byte(targetPeerID.String()))
+		if err != nil {
+			_ = stream.Close()
+			c.logger.Debugf("Failed to write to stream: %v", err)
+			continue
+		}
+
+		c.logger.Debugf("Sent address request for %s to %s", peerName, connectedPeer.String()[:16])
+
+		// Read response
+		buf := make([]byte, 4096)
+		n, err := stream.Read(buf)
+		_ = stream.Close()
+
+		if err != nil && !errors.Is(err, io.EOF) {
+			c.logger.Debugf("Failed to read response from %s: %v", connectedPeer.String()[:16], err)
+			continue
+		}
+
+		c.logger.Debugf("Received %d bytes response from %s", n, connectedPeer.String()[:16])
+
+		// Parse response (JSON array of multiaddrs)
+		var addrs []string
+		if err := json.Unmarshal(buf[:n], &addrs); err != nil {
+			c.logger.Debugf("Failed to parse response: %v (data: %s)", err, string(buf[:n]))
+			continue
+		}
+
+		c.logger.Debugf("Parsed response: %d addresses for %s", len(addrs), peerName)
+
+		if len(addrs) > 0 {
+			c.logger.Infof("Peer %s shared %d addresses for %s", connectedPeer.String()[:16], len(addrs), peerName)
+
+			// Add addresses to peerstore
+			maddrs := parseMultiaddrs(addrs)
+			c.host.Peerstore().AddAddrs(targetPeerID, maddrs, peerstore.PermanentAddrTTL)
+
+			// Try to connect
+			go c.tryConnectToTopicPeer(targetPeerID)
+			return // Success, no need to ask other peers
+		}
+	}
+
+	c.logger.Debugf("No connected peers had addresses for %s", peerName)
+}
+
+// handlePeerAddressRequest handles incoming requests for peer addresses
+func (c *client) handlePeerAddressRequest(stream network.Stream) {
+	defer func() { _ = stream.Close() }()
+
+	c.logger.Infof("Received peer address request from %s", stream.Conn().RemotePeer().String()[:16])
+
+	// Read the requested peer ID
+	buf := make([]byte, 256)
+	n, err := stream.Read(buf)
+	if err != nil {
+		c.logger.Errorf("Failed to read peer ID from request: %v", err)
+		return
+	}
+
+	requestedPeerIDStr := string(buf[:n])
+	c.logger.Debugf("Request for peer ID: %s", requestedPeerIDStr)
+
+	requestedPeerID, err := peer.Decode(requestedPeerIDStr)
+	if err != nil {
+		c.logger.Errorf("Failed to decode peer ID: %v", err)
+		return
+	}
+
+	requesterName := c.peerTracker.getName(stream.Conn().RemotePeer())
+	requestedName := c.peerTracker.getName(requestedPeerID)
+
+	// Check if we have addresses for this peer
+	addrs := c.host.Peerstore().Addrs(requestedPeerID)
+
+	c.logger.Infof("Peer address request from %s for %s: found %d addresses in peerstore",
+		requesterName, requestedName, len(addrs))
+
+	if len(addrs) == 0 {
+		// No addresses - send empty response
+		_, _ = stream.Write([]byte("[]"))
+		return
+	}
+
+	// Filter out relay circuit addresses - only share direct addresses
+	directAddrs := make([]multiaddr.Multiaddr, 0)
+	for _, addr := range addrs {
+		// Skip relay circuit addresses
+		if strings.Contains(addr.String(), "/p2p-circuit") {
+			continue
+		}
+		directAddrs = append(directAddrs, addr)
+	}
+
+	if len(directAddrs) == 0 {
+		c.logger.Debugf("No direct addresses for %s (only relay circuits)", requestedName)
+		_, _ = stream.Write([]byte("[]"))
+		return
+	}
+
+	// Convert to string array
+	addrStrs := make([]string, len(directAddrs))
+	for i, addr := range directAddrs {
+		addrStrs[i] = addr.String()
+		c.logger.Debugf("  Direct address %d: %s", i+1, addr.String())
+	}
+
+	// Send as JSON
+	response, err := json.Marshal(addrStrs)
+	if err != nil {
+		_, _ = stream.Write([]byte("[]"))
+		return
+	}
+
+	c.logger.Infof("Sharing %d direct addresses for peer %s with %s", len(directAddrs), requestedName, requesterName)
+	_, _ = stream.Write(response)
 }
 
 // Helper functions
