@@ -4,37 +4,36 @@ import (
 	"testing"
 	"time"
 
-	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 const testRelayPeerMultiaddr = "/ip4/127.0.0.1/tcp/4001/p2p/QmYyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N"
 
-func TestNewClientWithCustomRelayPeers(t *testing.T) {
+func TestNewClientWithCustomBootstrapPeers(t *testing.T) {
 	tests := []struct {
-		name       string
-		relayPeers []string
-		wantErr    bool
+		name           string
+		bootstrapPeers []string
+		wantErr        bool
 	}{
 		{
-			name: "single relay peer",
-			relayPeers: []string{
+			name: "single bootstrap peer",
+			bootstrapPeers: []string{
 				testRelayPeerMultiaddr,
 			},
 			wantErr: false,
 		},
 		{
-			name:       "empty relay peers",
-			relayPeers: []string{},
-			wantErr:    false,
+			name:           "empty bootstrap peers",
+			bootstrapPeers: []string{},
+			wantErr:        false,
 		},
 		{
-			name: "invalid relay peer",
-			relayPeers: []string{
-				"invalid-relay",
+			name: "invalid bootstrap peer",
+			bootstrapPeers: []string{
+				"invalid-bootstrap",
 			},
-			wantErr: false, // Invalid relays are logged but don't fail client creation
+			wantErr: false, // Invalid bootstrap peers are logged but don't fail client creation
 		},
 	}
 
@@ -44,9 +43,9 @@ func TestNewClientWithCustomRelayPeers(t *testing.T) {
 			require.NoError(t, err)
 
 			config := Config{
-				Name:       testPeerName,
-				PrivateKey: privKey,
-				RelayPeers: tt.relayPeers,
+				Name:           testPeerName,
+				PrivateKey:     privKey,
+				BootstrapPeers: tt.bootstrapPeers,
 			}
 
 			cl, err := NewClient(config)
@@ -62,36 +61,32 @@ func TestNewClientWithCustomRelayPeers(t *testing.T) {
 	}
 }
 
-func TestConfigureRelayPeersWithValidPeers(t *testing.T) {
+func TestConfigureBootstrapPeersWithValidPeers(t *testing.T) {
 	logger := &DefaultLogger{}
-	bootstrapPeers := []peer.AddrInfo{}
 
-	// Valid relay peer
-	relayPeersConfig := []string{
+	// Valid bootstrap peer
+	bootstrapPeersConfig := []string{
 		testRelayPeerMultiaddr,
 	}
 
-	customRelayPeers := parseRelayPeersFromConfig(relayPeersConfig, logger)
-	relayPeers := selectRelayPeers(customRelayPeers, bootstrapPeers, logger)
+	bootstrapPeers := parsePeerMultiaddrs(bootstrapPeersConfig, logger)
 
-	assert.Len(t, relayPeers, 1)
+	assert.Len(t, bootstrapPeers, 1)
 }
 
-func TestConfigureRelayPeersWithMixedValidity(t *testing.T) {
+func TestConfigureBootstrapPeersWithMixedValidity(t *testing.T) {
 	logger := &DefaultLogger{}
-	bootstrapPeers := []peer.AddrInfo{}
 
 	// Mix of valid and invalid
-	relayPeersConfig := []string{
+	bootstrapPeersConfig := []string{
 		testRelayPeerMultiaddr,
 		"invalid-peer",
 	}
 
-	customRelayPeers := parseRelayPeersFromConfig(relayPeersConfig, logger)
-	relayPeers := selectRelayPeers(customRelayPeers, bootstrapPeers, logger)
+	bootstrapPeers := parsePeerMultiaddrs(bootstrapPeersConfig, logger)
 
 	// Should have 1 valid peer (second one is invalid)
-	assert.Len(t, relayPeers, 1)
+	assert.Len(t, bootstrapPeers, 1)
 }
 
 func TestClientCloseTwice(t *testing.T) {
@@ -199,14 +194,36 @@ func TestClientWithAllOptions(t *testing.T) {
 	require.NoError(t, err)
 }
 
-func TestConnectToRelayPeersWithCustomPeers(t *testing.T) {
+func TestNewClientWithDHTModeOff(t *testing.T) {
 	privKey, err := GeneratePrivateKey()
 	require.NoError(t, err)
 
 	config := Config{
 		Name:       testPeerName,
 		PrivateKey: privKey,
-		RelayPeers: []string{
+		DHTMode:    "off",
+	}
+
+	cl, err := NewClient(config)
+	require.NoError(t, err)
+	require.NotNil(t, cl)
+
+	// Verify DHT is actually disabled (nil)
+	c := cl.(*client)
+	assert.Nil(t, c.dht)
+
+	err = cl.Close()
+	require.NoError(t, err)
+}
+
+func TestConnectToBootstrapPeersWithCustomPeers(t *testing.T) {
+	privKey, err := GeneratePrivateKey()
+	require.NoError(t, err)
+
+	config := Config{
+		Name:       testPeerName,
+		PrivateKey: privKey,
+		BootstrapPeers: []string{
 			"/ip4/127.0.0.1/tcp/9999/p2p/QmYyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N",
 		},
 	}

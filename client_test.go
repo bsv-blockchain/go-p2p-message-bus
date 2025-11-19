@@ -408,39 +408,28 @@ func TestGetLoggerCustom(t *testing.T) {
 	assert.Equal(t, customLogger, logger)
 }
 
-func TestConfigureRelayPeersEmpty(t *testing.T) {
+func TestParseBootstrapPeersEmpty(t *testing.T) {
 	logger := &DefaultLogger{}
 
-	// Create some bootstrap peers for testing
-	bootstrapPeers := []peer.AddrInfo{
-		{ID: "QmYyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N"},
-	}
+	bootstrapPeers := parsePeerMultiaddrs([]string{}, logger)
 
-	customRelayPeers := parseRelayPeersFromConfig([]string{}, logger)
-	relayPeers := selectRelayPeers(customRelayPeers, bootstrapPeers, logger)
-
-	// Should return bootstrap peers when no custom relays
-	assert.Equal(t, bootstrapPeers, relayPeers)
+	// Should return empty when no bootstrap peers provided
+	assert.Empty(t, bootstrapPeers)
 }
 
-func TestConfigureRelayPeersInvalidAddresses(t *testing.T) {
+func TestParseBootstrapPeersInvalidAddresses(t *testing.T) {
 	logger := &DefaultLogger{}
 
-	bootstrapPeers := []peer.AddrInfo{
-		{ID: "QmYyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N"},
-	}
-
 	// Invalid multiaddr strings
-	invalidRelays := []string{
+	invalidBootstrap := []string{
 		"invalid-address",
 		"not-a-multiaddr",
 	}
 
-	customRelayPeers := parseRelayPeersFromConfig(invalidRelays, logger)
-	relayPeers := selectRelayPeers(customRelayPeers, bootstrapPeers, logger)
+	bootstrapPeers := parsePeerMultiaddrs(invalidBootstrap, logger)
 
-	// Should fall back to bootstrap peers on invalid addresses
-	assert.Equal(t, bootstrapPeers, relayPeers)
+	// Should return empty on invalid addresses (errors are logged)
+	assert.Empty(t, bootstrapPeers)
 }
 
 func TestClientWithSamePeerID(t *testing.T) {

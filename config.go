@@ -69,18 +69,48 @@ type Config struct {
 	// Set to a negative value to disable TTL-based eviction.
 	PeerCacheTTL time.Duration
 
-	// RelayPeers is an optional list of multiaddr strings for relay servers.
-	// If provided, these peers will be used for relay/circuit functionality when behind NAT.
-	// If not provided, bootstrap peers will be used as relays.
-	// Example: []string{"/ip4/1.2.3.4/tcp/4001/p2p/QmPeerID"}
-	RelayPeers []string
+	// BootstrapPeers is an optional list of multiaddr strings for bootstrap servers.
+	// If provided, these peers will be used for DHT bootstrapping and relay/circuit functionality.
+	// If not provided, default IPFS bootstrap peers will be used for bootstrapping and relay.
+	//
+	// IMPORTANT: When DHTMode is "off", include ALL known bootstrap servers here for best results.
+	// Topic peer exchange can only establish direct connections to peers whose addresses are
+	// in the peerstore, which comes from bootstrap peers and identify protocol exchanges.
+	//
+	// Example: []string{
+	//   "/dns4/server1.example.com/tcp/9905/p2p/12D3KooW...",
+	//   "/dns4/server2.example.com/tcp/9905/p2p/12D3KooW...",
+	// }
+	BootstrapPeers []string
 
-	// DHTMode specifies whether this node runs the DHT in client or server mode.
-	// Valid values: "client", "server"
-	// - "client": Can query DHT but doesn't advertise itself or store provider records.
-	//             No ProviderManager cleanup overhead.
-	// - "server": Participates fully in DHT, advertises itself, stores provider records.
-	//             Has periodic cleanup overhead. Default mode for proper P2P networks.
+	// DHTMode specifies how this node participates in the DHT.
+	// Valid values: "server", "client", "off"
+	//
+	// - "server": Full DHT participation (advertises, stores provider records, routes queries).
+	//             Connects to the broader IPFS/libp2p DHT network.
+	//             High overhead but collects peer addresses from across the network.
+	//             Use this for: bootstrap/relay servers, public well-connected nodes.
+	//
+	// - "client": Queries DHT but doesn't advertise or store records.
+	//             Still crawls DHT network for routing (connects to 100+ peers).
+	//             Reduced overhead but NOT lightweight - still participates in DHT routing.
+	//             Generally not recommended - use "server" or "off" instead.
+	//
+	// - "off":    Completely disables DHT. Topic-only network mode.
+	//             Only connects to BootstrapPeers and discovers topic peers via GossipSub mesh.
+	//             Most lightweight - no DHT crawling, no random peer connections.
+	//             Uses custom peer address exchange protocol to request direct addresses
+	//             from connected peers (typically bootstrap servers running in "server" mode).
+	//             DHT-based hole punching is not available in this mode. Peers without
+	//             public addresses will communicate via relay circuits through bootstrap servers.
+	//             Ideal for: lightweight clients, isolated topic networks, avoiding DHT overhead.
+	//             RECOMMENDED for abuse-sensitive cloud hosting (Hetzner, OVH, etc.) to avoid
+	//             network scanning alerts from DHT peer discovery connecting to 100+ IPs.
+	//
+	// ARCHITECTURE: Run bootstrap servers in "server" mode (collects addresses via DHT),
+	//               and clients in "off" mode (requests addresses from bootstrap servers).
+	//               This creates a hybrid model: servers are well-connected, clients are lightweight.
+	//
 	// If not provided or empty, defaults to "server" mode.
 	DHTMode string
 
