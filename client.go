@@ -171,6 +171,8 @@ func NewClient(config Config) (Client, error) {
 		clientLogger.Infof("Topic peer exchange enabled - will attempt direct connections to discovered peers")
 		// Periodically check for new peer addresses learned via PX
 		go c.attemptDirectConnectionsToTopicPeers(ctx)
+		// Maintain bootstrap peer connections in DHT off mode
+		go c.maintainBootstrapConnections(ctx, bootstrapPeers)
 	}
 
 	return c, nil
@@ -780,6 +782,42 @@ func (c *client) shouldLogConnectionError(err error) bool {
 		}
 	}
 	return true
+}
+
+// maintainBootstrapConnections periodically checks bootstrap peer connections
+// and reconnects if they become disconnected. This is critical in DHT off mode
+// where bootstrap peers are the only way to stay connected to the network.
+func (c *client) maintainBootstrapConnections(ctx context.Context, bootstrapPeers []peer.AddrInfo) {
+	if len(bootstrapPeers) == 0 {
+		c.logger.Debugf("No bootstrap peers to maintain")
+		return
+	}
+
+	c.logger.Infof("Starting bootstrap peer maintenance for %d peers", len(bootstrapPeers))
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			c.logger.Infof("Bootstrap peer maintenance stopping")
+			return
+		case <-ticker.C:
+			for _, peerInfo := range bootstrapPeers {
+				// Check if we're still connected to this bootstrap peer
+				if c.host.Network().Connectedness(peerInfo.ID) != network.Connected {
+					c.logger.Infof("Bootstrap peer %s disconnected, attempting reconnection", peerInfo.ID.String()[:16])
+					go func(pi peer.AddrInfo) {
+						if err := c.host.Connect(ctx, pi); err != nil {
+							c.logger.Warnf("Failed to reconnect to bootstrap peer %s: %v", pi.ID.String()[:16], err)
+						} else {
+							c.logger.Infof("Successfully reconnected to bootstrap peer %s", pi.ID.String()[:16])
+						}
+					}(peerInfo)
+				}
+			}
+		}
+	}
 }
 
 // attemptDirectConnectionsToTopicPeers periodically queries connected peers for
