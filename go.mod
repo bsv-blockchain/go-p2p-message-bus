@@ -5,7 +5,7 @@ go 1.24.6
 require (
 	github.com/ipfs/go-datastore v0.9.0
 	github.com/libp2p/go-libp2p v0.45.0
-	github.com/libp2p/go-libp2p-kad-dht v0.35.1
+	github.com/libp2p/go-libp2p-kad-dht v0.36.0
 	github.com/libp2p/go-libp2p-pubsub v0.15.0
 	github.com/multiformats/go-multiaddr v0.16.1
 	github.com/stretchr/testify v1.11.1
