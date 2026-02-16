@@ -3,7 +3,7 @@ module github.com/bsv-blockchain/go-p2p-message-bus
 go 1.24.6
 
 require (
-	github.com/ipfs/go-datastore v0.9.0
+	github.com/ipfs/go-datastore v0.9.1
 	github.com/libp2p/go-libp2p v0.47.0
 	github.com/libp2p/go-libp2p-kad-dht v0.37.1
 	github.com/libp2p/go-libp2p-pubsub v0.15.0
