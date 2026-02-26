@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/multiformats/go-multiaddr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -72,6 +73,55 @@ func TestConfigureBootstrapPeersWithValidPeers(t *testing.T) {
 	bootstrapPeers := parsePeerMultiaddrs(bootstrapPeersConfig, logger)
 
 	assert.Len(t, bootstrapPeers, 1)
+}
+
+func TestParseDNSAddrBootstrapPeers(t *testing.T) {
+	logger := &DefaultLogger{}
+
+	// Use the live dnsaddr record for Teranode bootstrap peers
+	bootstrapPeers := parsePeerMultiaddrs([]string{
+		"/dnsaddr/bootstrap.teranode.bsvb.tech",
+	}, logger)
+
+	// Should resolve to multiple peers from DNS TXT records
+	require.NotEmpty(t, bootstrapPeers, "dnsaddr should resolve to at least one peer")
+	assert.GreaterOrEqual(t, len(bootstrapPeers), 2, "expected multiple bootstrap peers from dnsaddr")
+
+	// Each resolved peer should have a valid ID and addresses
+	for _, p := range bootstrapPeers {
+		assert.NotEmpty(t, p.ID.String(), "resolved peer should have an ID")
+		assert.NotEmpty(t, p.Addrs, "resolved peer should have addresses")
+	}
+}
+
+func TestParseDNSAddrMixedWithExplicit(t *testing.T) {
+	logger := &DefaultLogger{}
+
+	// Mix of dnsaddr and explicit multiaddr
+	bootstrapPeers := parsePeerMultiaddrs([]string{
+		"/dnsaddr/bootstrap.teranode.bsvb.tech",
+		testRelayPeerMultiaddr,
+	}, logger)
+
+	// Should have resolved dnsaddr peers + 1 explicit peer
+	assert.Greater(t, len(bootstrapPeers), 1, "should have dnsaddr peers plus the explicit peer")
+}
+
+func TestIsDNSAddr(t *testing.T) {
+	tests := []struct {
+		addr     string
+		expected bool
+	}{
+		{"/dnsaddr/bootstrap.teranode.bsvb.tech", true},
+		{"/dns4/example.com/tcp/9905/p2p/12D3KooWH5JVqGdaw7JEizmysCfRRcPGTFfvRJF7Hkure7oQWYnb", false},
+		{"/ip4/1.2.3.4/tcp/9905/p2p/12D3KooWH5JVqGdaw7JEizmysCfRRcPGTFfvRJF7Hkure7oQWYnb", false},
+	}
+
+	for _, tt := range tests {
+		maddr, err := multiaddr.NewMultiaddr(tt.addr)
+		require.NoError(t, err)
+		assert.Equal(t, tt.expected, isDNSAddr(maddr), "isDNSAddr(%s)", tt.addr)
+	}
 }
 
 func TestConfigureBootstrapPeersWithMixedValidity(t *testing.T) {
