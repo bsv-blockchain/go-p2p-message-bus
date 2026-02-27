@@ -472,7 +472,9 @@ func isDNSAddr(maddr multiaddr.Multiaddr) bool {
 func connectToBootstrapPeers(ctx context.Context, h host.Host, peers []peer.AddrInfo, log logger) {
 	for _, peerInfo := range peers {
 		go func(pi peer.AddrInfo) {
-			if connectErr := h.Connect(ctx, pi); connectErr == nil {
+			if connectErr := h.Connect(ctx, pi); connectErr != nil {
+				log.Warnf("Failed to connect to bootstrap peer %s (%v): %v", pi.ID.String()[:16], pi.Addrs, connectErr)
+			} else {
 				log.Infof("Connected to bootstrap peer: %s", pi.ID.String())
 			}
 		}(peerInfo)

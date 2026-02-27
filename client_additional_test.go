@@ -80,7 +80,7 @@ func TestParseDNSAddrBootstrapPeers(t *testing.T) {
 
 	// Use the live dnsaddr record for Teranode bootstrap peers
 	bootstrapPeers := parsePeerMultiaddrs([]string{
-		"/dnsaddr/bootstrap.teranode.bsvb.tech",
+		"/dnsaddr/teratestnet.bootstrap.teranode.bsvb.tech",
 	}, logger)
 
 	// Should resolve to multiple peers from DNS TXT records
@@ -99,7 +99,7 @@ func TestParseDNSAddrMixedWithExplicit(t *testing.T) {
 
 	// Mix of dnsaddr and explicit multiaddr
 	bootstrapPeers := parsePeerMultiaddrs([]string{
-		"/dnsaddr/bootstrap.teranode.bsvb.tech",
+		"/dnsaddr/teratestnet.bootstrap.teranode.bsvb.tech",
 		testRelayPeerMultiaddr,
 	}, logger)
 
@@ -112,7 +112,7 @@ func TestIsDNSAddr(t *testing.T) {
 		addr     string
 		expected bool
 	}{
-		{"/dnsaddr/bootstrap.teranode.bsvb.tech", true},
+		{"/dnsaddr/teratestnet.bootstrap.teranode.bsvb.tech", true},
 		{"/dns4/example.com/tcp/9905/p2p/12D3KooWH5JVqGdaw7JEizmysCfRRcPGTFfvRJF7Hkure7oQWYnb", false},
 		{"/ip4/1.2.3.4/tcp/9905/p2p/12D3KooWH5JVqGdaw7JEizmysCfRRcPGTFfvRJF7Hkure7oQWYnb", false},
 	}
