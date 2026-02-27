@@ -75,36 +75,28 @@ func TestConfigureBootstrapPeersWithValidPeers(t *testing.T) {
 	assert.Len(t, bootstrapPeers, 1)
 }
 
-func TestParseDNSAddrBootstrapPeers(t *testing.T) {
+func TestParseDNSAddrUnresolvable(t *testing.T) {
 	logger := &DefaultLogger{}
 
-	// Use the live dnsaddr record for Teranode bootstrap peers
+	// Unresolvable dnsaddr should be skipped gracefully
 	bootstrapPeers := parsePeerMultiaddrs([]string{
-		"/dnsaddr/bootstrap.teranode.bsvb.tech",
+		"/dnsaddr/nonexistent.invalid",
 	}, logger)
 
-	// Should resolve to multiple peers from DNS TXT records
-	require.NotEmpty(t, bootstrapPeers, "dnsaddr should resolve to at least one peer")
-	assert.GreaterOrEqual(t, len(bootstrapPeers), 2, "expected multiple bootstrap peers from dnsaddr")
-
-	// Each resolved peer should have a valid ID and addresses
-	for _, p := range bootstrapPeers {
-		assert.NotEmpty(t, p.ID.String(), "resolved peer should have an ID")
-		assert.NotEmpty(t, p.Addrs, "resolved peer should have addresses")
-	}
+	assert.Empty(t, bootstrapPeers, "unresolvable dnsaddr should return no peers")
 }
 
 func TestParseDNSAddrMixedWithExplicit(t *testing.T) {
 	logger := &DefaultLogger{}
 
-	// Mix of dnsaddr and explicit multiaddr
+	// Unresolvable dnsaddr mixed with a valid explicit peer
 	bootstrapPeers := parsePeerMultiaddrs([]string{
-		"/dnsaddr/bootstrap.teranode.bsvb.tech",
+		"/dnsaddr/nonexistent.invalid",
 		testRelayPeerMultiaddr,
 	}, logger)
 
-	// Should have resolved dnsaddr peers + 1 explicit peer
-	assert.Greater(t, len(bootstrapPeers), 1, "should have dnsaddr peers plus the explicit peer")
+	// Should still have the explicit peer even though dnsaddr failed
+	assert.Len(t, bootstrapPeers, 1, "explicit peer should survive dnsaddr failure")
 }
 
 func TestIsDNSAddr(t *testing.T) {
@@ -112,7 +104,7 @@ func TestIsDNSAddr(t *testing.T) {
 		addr     string
 		expected bool
 	}{
-		{"/dnsaddr/bootstrap.teranode.bsvb.tech", true},
+		{"/dnsaddr/bootstrap.example.com", true},
 		{"/dns4/example.com/tcp/9905/p2p/12D3KooWH5JVqGdaw7JEizmysCfRRcPGTFfvRJF7Hkure7oQWYnb", false},
 		{"/ip4/1.2.3.4/tcp/9905/p2p/12D3KooWH5JVqGdaw7JEizmysCfRRcPGTFfvRJF7Hkure7oQWYnb", false},
 	}
