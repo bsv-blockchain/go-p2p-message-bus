@@ -23,6 +23,10 @@ type Client interface {
 	// GetID returns this peer's ID as a string.
 	GetID() string
 
+	// Connect connects to a peer using a multiaddr string (e.g. "/dns/localhost/tcp/9905/p2p/12D3KooW...").
+	// This is useful for connecting to static peers that are known ahead of time.
+	Connect(ctx context.Context, peerMultiaddr string) error
+
 	// Close shuts down the client and releases all resources.
 	Close() error
 }

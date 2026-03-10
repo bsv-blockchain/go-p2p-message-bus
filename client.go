@@ -655,6 +655,31 @@ func (c *client) Close() error {
 	}
 }
 
+// Connect connects to a peer using a multiaddr string.
+// This bypasses the bootstrap peer mechanism and directly connects to the specified peer.
+func (c *client) Connect(ctx context.Context, peerMultiaddr string) error {
+	maddr, err := multiaddr.NewMultiaddr(peerMultiaddr)
+	if err != nil {
+		return fmt.Errorf("invalid multiaddr %s: %w", peerMultiaddr, err)
+	}
+
+	addrInfo, err := peer.AddrInfoFromP2pAddr(maddr)
+	if err != nil {
+		return fmt.Errorf("invalid peer address %s: %w", peerMultiaddr, err)
+	}
+
+	if addrInfo.ID == c.host.ID() {
+		return nil // skip self
+	}
+
+	if err := c.host.Connect(ctx, *addrInfo); err != nil {
+		return fmt.Errorf("failed to connect to peer %s: %w", addrInfo.ID.String(), err)
+	}
+
+	c.logger.Infof("Connected to static peer: %s", addrInfo.ID.String())
+	return nil
+}
+
 // Internal methods
 
 //nolint:gocyclo // DHT advertising logic complexity is reasonable
