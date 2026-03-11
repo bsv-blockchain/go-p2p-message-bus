@@ -212,11 +212,11 @@ func displayPeers(ctx context.Context, client p2p.Client, logger *p2p.DefaultLog
 			peers := client.GetPeers()
 			if len(peers) > 0 {
 				sb := strings.Builder{}
-				sb.WriteString(fmt.Sprintf("\n=== Connected Peers: %d ===\n", len(peers)))
+				fmt.Fprintf(&sb, "\n=== Connected Peers: %d ===\n", len(peers))
 				for _, peer := range peers {
-					sb.WriteString(fmt.Sprintf("  - %s [%s]\n", peer.Name, peer.ID))
+					fmt.Fprintf(&sb, "  - %s [%s]\n", peer.Name, peer.ID)
 					for _, addr := range peer.Addrs {
-						sb.WriteString(fmt.Sprintf("    %s\n", addr))
+						fmt.Fprintf(&sb, "    %s\n", addr)
 					}
 				}
 				logger.Infof("%s", sb.String())

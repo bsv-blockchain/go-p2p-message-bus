@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/multiformats/go-multiaddr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -72,6 +73,47 @@ func TestConfigureBootstrapPeersWithValidPeers(t *testing.T) {
 	bootstrapPeers := parsePeerMultiaddrs(bootstrapPeersConfig, logger)
 
 	assert.Len(t, bootstrapPeers, 1)
+}
+
+func TestParseDNSAddrUnresolvable(t *testing.T) {
+	logger := &DefaultLogger{}
+
+	// Unresolvable dnsaddr should be skipped gracefully
+	bootstrapPeers := parsePeerMultiaddrs([]string{
+		"/dnsaddr/nonexistent.invalid",
+	}, logger)
+
+	assert.Empty(t, bootstrapPeers, "unresolvable dnsaddr should return no peers")
+}
+
+func TestParseDNSAddrMixedWithExplicit(t *testing.T) {
+	logger := &DefaultLogger{}
+
+	// Unresolvable dnsaddr mixed with a valid explicit peer
+	bootstrapPeers := parsePeerMultiaddrs([]string{
+		"/dnsaddr/nonexistent.invalid",
+		testRelayPeerMultiaddr,
+	}, logger)
+
+	// Should still have the explicit peer even though dnsaddr failed
+	assert.Len(t, bootstrapPeers, 1, "explicit peer should survive dnsaddr failure")
+}
+
+func TestIsDNSAddr(t *testing.T) {
+	tests := []struct {
+		addr     string
+		expected bool
+	}{
+		{"/dnsaddr/bootstrap.example.com", true},
+		{"/dns4/example.com/tcp/9905/p2p/12D3KooWH5JVqGdaw7JEizmysCfRRcPGTFfvRJF7Hkure7oQWYnb", false},
+		{"/ip4/1.2.3.4/tcp/9905/p2p/12D3KooWH5JVqGdaw7JEizmysCfRRcPGTFfvRJF7Hkure7oQWYnb", false},
+	}
+
+	for _, tt := range tests {
+		maddr, err := multiaddr.NewMultiaddr(tt.addr)
+		require.NoError(t, err)
+		assert.Equal(t, tt.expected, isDNSAddr(maddr), "isDNSAddr(%s)", tt.addr)
+	}
 }
 
 func TestConfigureBootstrapPeersWithMixedValidity(t *testing.T) {

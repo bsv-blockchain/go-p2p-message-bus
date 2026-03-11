@@ -2,6 +2,7 @@ package p2p
 
 import (
 	"context"
+	"strconv"
 	"testing"
 	"time"
 
@@ -259,7 +260,7 @@ func TestClientPublishConcurrent(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		go func(n int) {
 			data := []byte("test message")
-			topicName := "test-topic-" + string(rune('0'+n))
+			topicName := "test-topic-" + strconv.Itoa(n)
 			done <- cl.Publish(ctx, topicName, data)
 		}(i)
 	}

@@ -37,6 +37,7 @@ import (
 	"github.com/libp2p/go-libp2p/p2p/net/connmgr"
 	"github.com/libp2p/go-libp2p/p2p/transport/tcp"
 	"github.com/multiformats/go-multiaddr"
+	madns "github.com/multiformats/go-multiaddr-dns"
 )
 
 const (
@@ -417,7 +418,8 @@ func setupDHT(ctx context.Context, h host.Host, config Config, bootstrapPeers []
 	return kadDHT, nil
 }
 
-// parsePeerMultiaddrs is a shared helper to parse bootstrap peer multiaddr strings
+// parsePeerMultiaddrs is a shared helper to parse bootstrap peer multiaddr strings.
+// Supports /dnsaddr/ multiaddrs which are resolved via DNS TXT records at _dnsaddr.<domain>.
 func parsePeerMultiaddrs(peerConfigs []string, log logger) []peer.AddrInfo {
 	if len(peerConfigs) == 0 {
 		return nil
@@ -427,9 +429,29 @@ func parsePeerMultiaddrs(peerConfigs []string, log logger) []peer.AddrInfo {
 	for _, peerStr := range peerConfigs {
 		maddr, err := multiaddr.NewMultiaddr(peerStr)
 		if err != nil {
-			log.Errorf("Invalid bootstrap address %s: %v (hint: use /dns4/ for hostnames, /ip4/ for IP addresses)", peerStr, err)
+			log.Errorf("Invalid bootstrap address %s: %v (hint: use /dns4/ for hostnames, /ip4/ for IP addresses, /dnsaddr/ for DNS-based discovery)", peerStr, err)
 			continue
 		}
+
+		// Resolve /dnsaddr/ multiaddrs via DNS TXT records
+		if isDNSAddr(maddr) {
+			resolved, resolveErr := madns.DefaultResolver.Resolve(context.Background(), maddr)
+			if resolveErr != nil {
+				log.Errorf("Failed to resolve dnsaddr %s: %v", peerStr, resolveErr)
+				continue
+			}
+			log.Infof("Resolved dnsaddr %s to %d peer(s)", peerStr, len(resolved))
+			for _, raddr := range resolved {
+				addrInfo, addrErr := peer.AddrInfoFromP2pAddr(raddr)
+				if addrErr != nil {
+					log.Errorf("Invalid resolved peer address %s: %v", raddr, addrErr)
+					continue
+				}
+				peers = append(peers, *addrInfo)
+			}
+			continue
+		}
+
 		addrInfo, err := peer.AddrInfoFromP2pAddr(maddr)
 		if err != nil {
 			log.Errorf("Invalid bootstrap peer info %s: %v", peerStr, err)
@@ -441,10 +463,18 @@ func parsePeerMultiaddrs(peerConfigs []string, log logger) []peer.AddrInfo {
 	return peers
 }
 
+// isDNSAddr checks if a multiaddr starts with a /dnsaddr/ component
+func isDNSAddr(maddr multiaddr.Multiaddr) bool {
+	first, _ := multiaddr.SplitFirst(maddr)
+	return first != nil && first.Protocol().Code == multiaddr.P_DNSADDR
+}
+
 func connectToBootstrapPeers(ctx context.Context, h host.Host, peers []peer.AddrInfo, log logger) {
 	for _, peerInfo := range peers {
 		go func(pi peer.AddrInfo) {
-			if connectErr := h.Connect(ctx, pi); connectErr == nil {
+			if connectErr := h.Connect(ctx, pi); connectErr != nil {
+				log.Warnf("Failed to connect to bootstrap peer %s (%v): %v", pi.ID.String()[:16], pi.Addrs, connectErr)
+			} else {
 				log.Infof("Connected to bootstrap peer: %s", pi.ID.String())
 			}
 		}(peerInfo)

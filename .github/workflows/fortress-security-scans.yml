@@ -71,7 +71,6 @@ jobs:
     if: ${{ inputs.enable-nancy }}
     permissions:
       contents: read
-      actions: write # Required for workflow cancellation on failure
     steps:
       # --------------------------------------------------------------------
       # Checkout code (required for local actions)
@@ -100,6 +99,7 @@ jobs:
           go-secondary-version: ${{ inputs.go-primary-version }}
           go-sum-file: ${{ inputs.go-sum-file }}
           enable-multi-module: ${{ env.ENABLE_MULTI_MODULE_TESTING }}
+          github-token: ${{ secrets.github-token }}
 
       # --------------------------------------------------------------------
       # Extract Go module directory from GO_SUM_FILE path
@@ -220,11 +220,11 @@ jobs:
       # --------------------------------------------------------------------
       - name: 📤 Upload Nancy scan results
         if: always()
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        uses: ./.github/actions/upload-artifact-resilient
         with:
-          name: nancy-scan-results
-          path: nancy-output.log
-          retention-days: 7
+          artifact-name: nancy-scan-results
+          artifact-path: nancy-output.log
+          retention-days: "7"
           if-no-files-found: ignore
 
       # --------------------------------------------------------------------
@@ -259,15 +259,6 @@ jobs:
           echo "❌ Nancy detected vulnerabilities in dependencies"
           exit 1
 
-      # --------------------------------------------------------------------
-      # Cancel workflow on failure (save CI resources)
-      # --------------------------------------------------------------------
-      - name: 🚨 Cancel workflow on failure
-        if: failure()
-        uses: ./.github/actions/cancel-workflow-on-failure
-        with:
-          reason: "Nancy dependency security check failed"
-
   # ----------------------------------------------------------------------------------
   # Govulncheck (Vulnerability Checks)
   # ----------------------------------------------------------------------------------
@@ -277,7 +268,6 @@ jobs:
     if: ${{ inputs.enable-govulncheck }}
     permissions:
       contents: read
-      actions: write # Required for workflow cancellation on failure
     steps:
       # --------------------------------------------------------------------
       # Checkout code (required for local actions)
@@ -308,6 +298,7 @@ jobs:
           go-secondary-version: ${{ inputs.go-primary-version }}
           go-sum-file: ${{ inputs.go-sum-file }}
           enable-multi-module: ${{ env.ENABLE_MULTI_MODULE_TESTING }}
+          github-token: ${{ secrets.github-token }}
 
       # --------------------------------------------------------------------
       # Extract Go module directory from GO_SUM_FILE path
@@ -333,7 +324,7 @@ jobs:
       # --------------------------------------------------------------------
       - name: 💾 Restore govulncheck binary cache
         id: govuln-cache
-        uses: actions/cache@8b402f58fbc84540c8b491a91e594a4576fec3d7 # v5.0.2
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
           path: |
             ~/.cache/govulncheck-bin
@@ -469,11 +460,11 @@ jobs:
       # --------------------------------------------------------------------
       - name: 📤 Upload govulncheck results
         if: always()
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        uses: ./.github/actions/upload-artifact-resilient
         with:
-          name: govulncheck-scan-results
-          path: govulncheck-output.log
-          retention-days: 7
+          artifact-name: govulncheck-scan-results
+          artifact-path: govulncheck-output.log
+          retention-days: "7"
           if-no-files-found: ignore
 
       # --------------------------------------------------------------------
@@ -508,15 +499,6 @@ jobs:
           echo "❌ Govulncheck detected vulnerabilities in dependencies"
           exit 1
 
-      # --------------------------------------------------------------------
-      # Cancel workflow on failure (save CI resources)
-      # --------------------------------------------------------------------
-      - name: 🚨 Cancel workflow on failure
-        if: failure()
-        uses: ./.github/actions/cancel-workflow-on-failure
-        with:
-          reason: "Govulncheck vulnerability scan failed"
-
   # ----------------------------------------------------------------------------------
   # Gitleaks (Secret Scanning)
   # ----------------------------------------------------------------------------------
@@ -526,7 +508,7 @@ jobs:
     if: ${{ inputs.enable-gitleaks }}
     permissions:
       contents: read
-      actions: write # Required for workflow cancellation on failure
+      pull-requests: write
     steps:
       # --------------------------------------------------------------------
       # Checkout code (required for local actions)
@@ -582,7 +564,7 @@ jobs:
         continue-on-error: true
         uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
         env:
-          GITHUB_TOKEN: ${{ secrets.github-token }}
+          GITHUB_TOKEN: ${{ github.token }}
           GITLEAKS_LICENSE: ${{ secrets.gitleaks-license }}
           GITLEAKS_NOTIFY_USER_LIST: ${{ env.GITLEAKS_NOTIFY_USER_LIST }}
           GITLEAKS_ENABLE_COMMENTS: "true"
@@ -649,12 +631,3 @@ jobs:
         run: |
           echo "❌ Gitleaks detected secrets in the repository"
           exit 1
-
-      # --------------------------------------------------------------------
-      # Cancel workflow on failure (save CI resources)
-      # --------------------------------------------------------------------
-      - name: 🚨 Cancel workflow on failure
-        if: failure()
-        uses: ./.github/actions/cancel-workflow-on-failure
-        with:
-          reason: "Gitleaks secret scan failed"

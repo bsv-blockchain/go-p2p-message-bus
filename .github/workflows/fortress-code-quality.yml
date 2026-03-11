@@ -66,7 +66,6 @@ jobs:
     runs-on: ${{ inputs.primary-runner }}
     permissions:
       contents: read
-      actions: write # Required for workflow cancellation on failure
     steps:
       # --------------------------------------------------------------------
       # Checkout code (required for local actions)
@@ -95,6 +94,7 @@ jobs:
           go-secondary-version: ${{ inputs.go-primary-version }}
           go-sum-file: ${{ env.GO_SUM_FILE }}
           enable-multi-module: ${{ env.ENABLE_MULTI_MODULE_TESTING }}
+          github-token: ${{ secrets.github-token }}
 
       # --------------------------------------------------------------------
       # Extract Go module directory from GO_SUM_FILE path
@@ -227,11 +227,11 @@ jobs:
       # --------------------------------------------------------------------
       - name: 📤 Upload go vet results
         if: always()
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        uses: ./.github/actions/upload-artifact-resilient
         with:
-          name: govet-results
-          path: govet-output.log
-          retention-days: 7
+          artifact-name: govet-results
+          artifact-path: govet-output.log
+          retention-days: "7"
           if-no-files-found: ignore
 
       # --------------------------------------------------------------------
@@ -270,15 +270,6 @@ jobs:
           echo "❌ Go vet detected static analysis issues"
           exit 1
 
-      # --------------------------------------------------------------------
-      # Cancel workflow on failure (save CI resources)
-      # --------------------------------------------------------------------
-      - name: 🚨 Cancel workflow on failure
-        if: failure()
-        uses: ./.github/actions/cancel-workflow-on-failure
-        with:
-          reason: "Go vet static analysis failed"
-
   # ----------------------------------------------------------------------------------
   # Lint (Code Linting)
   # ----------------------------------------------------------------------------------
@@ -289,7 +280,6 @@ jobs:
     runs-on: ${{ inputs.primary-runner }}
     permissions:
       contents: read
-      actions: write # Required for workflow cancellation on failure
     outputs:
       golangci-lint-version: ${{ steps.golangci-lint-version.outputs.version }}
     steps:
@@ -327,6 +317,7 @@ jobs:
           go-secondary-version: ${{ inputs.go-primary-version }}
           go-sum-file: ${{ env.GO_SUM_FILE }}
           enable-multi-module: ${{ env.ENABLE_MULTI_MODULE_TESTING }}
+          github-token: ${{ secrets.github-token }}
 
       # --------------------------------------------------------------------
       # Extract Go module directory from GO_SUM_FILE path
@@ -359,7 +350,7 @@ jobs:
       # --------------------------------------------------------------------
       - name: 💾 Restore golangci-lint binary cache
         id: cache-golangci-lint-binary
-        uses: actions/cache@8b402f58fbc84540c8b491a91e594a4576fec3d7 # v5.0.2
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
           path: ~/.cache/golangci-lint-bin
           key: ${{ inputs.primary-runner }}-golangci-lint-binary-${{ env.MAGE_X_GOLANGCI_LINT_VERSION }}
@@ -388,7 +379,7 @@ jobs:
       # --------------------------------------------------------------------
       - name: 💾 Cache golangci-lint build cache
         id: cache-golangci-lint-build
-        uses: actions/cache@8b402f58fbc84540c8b491a91e594a4576fec3d7 # v5.0.2
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
           path: ~/.cache/go-build
           key: ${{ inputs.primary-runner }}-go-build-golangci-${{ env.MAGE_X_GOLANGCI_LINT_VERSION }}-${{ hashFiles('**/*.go') }}
@@ -400,7 +391,7 @@ jobs:
       # --------------------------------------------------------------------
       - name: 💾 Cache golangci-lint analysis
         id: cache-golangci-lint
-        uses: actions/cache@8b402f58fbc84540c8b491a91e594a4576fec3d7 # v5.0.2
+        uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
           path: ${{ env.GOLANGCI_LINT_CACHE }}
           key: ${{ inputs.primary-runner }}-golangci-lint-analysis-${{ hashFiles('.golangci.json', env.GO_SUM_FILE) }}-${{ steps.golangci-lint-version.outputs.version }}
@@ -524,11 +515,11 @@ jobs:
       # --------------------------------------------------------------------
       - name: 📤 Upload lint results
         if: always()
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        uses: ./.github/actions/upload-artifact-resilient
         with:
-          name: lint-results
-          path: lint-output.log
-          retention-days: 7
+          artifact-name: lint-results
+          artifact-path: lint-output.log
+          retention-days: "7"
           if-no-files-found: ignore
 
       # --------------------------------------------------------------------
@@ -568,15 +559,6 @@ jobs:
           echo "❌ Lint detected code quality issues"
           exit 1
 
-      # --------------------------------------------------------------------
-      # Cancel workflow on failure (save CI resources)
-      # --------------------------------------------------------------------
-      - name: 🚨 Cancel workflow on failure
-        if: failure()
-        uses: ./.github/actions/cancel-workflow-on-failure
-        with:
-          reason: "Code linting (golangci-lint) failed"
-
   # ----------------------------------------------------------------------------------
   # YAML/JSON Format Validation (MAGE-X)
   # ----------------------------------------------------------------------------------
@@ -586,7 +568,6 @@ jobs:
     runs-on: ${{ inputs.primary-runner }}
     permissions:
       contents: read
-      actions: write # Required for workflow cancellation on failure
     outputs:
       yamlfmt-version: ${{ steps.yamlfmt-version.outputs.version }}
     steps:
@@ -617,6 +598,7 @@ jobs:
           go-secondary-version: ${{ inputs.go-primary-version }}
           go-sum-file: ${{ env.GO_SUM_FILE }}
           enable-multi-module: ${{ env.ENABLE_MULTI_MODULE_TESTING }}
+          github-token: ${{ secrets.github-token }}
 
       # --------------------------------------------------------------------
       # Extract Go module directory from GO_SUM_FILE path
@@ -786,11 +768,11 @@ jobs:
       # --------------------------------------------------------------------
       - name: 📤 Upload format check results
         if: always()
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        uses: ./.github/actions/upload-artifact-resilient
         with:
-          name: format-check-results
-          path: format-output.log
-          retention-days: 7
+          artifact-name: format-check-results
+          artifact-path: format-output.log
+          retention-days: "7"
           if-no-files-found: ignore
 
       # --------------------------------------------------------------------
@@ -801,12 +783,3 @@ jobs:
         run: |
           echo "❌ Format check detected YAML/JSON formatting issues"
           exit 1
-
-      # --------------------------------------------------------------------
-      # Cancel workflow on failure (save CI resources)
-      # --------------------------------------------------------------------
-      - name: 🚨 Cancel workflow on failure
-        if: failure()
-        uses: ./.github/actions/cancel-workflow-on-failure
-        with:
-          reason: "YAML/JSON format validation failed"
