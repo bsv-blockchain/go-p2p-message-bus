@@ -225,7 +225,7 @@ func TestGossipSubPeerExchangeEnabled(t *testing.T) {
 
 // TestTwoPeersDiscoverViaDirectConnect verifies that two peers can discover
 // each other and exchange topic messages when connected directly.
-// Note: BootstrapPeers are intentionally ignored in test mode (testing.Testing()),
+// BootstrapPeers are intentionally ignored in test mode (testing.Testing()),
 // so we use Connect() to establish the initial connection.
 func TestTwoPeersDiscoverViaDirectConnect(t *testing.T) {
 	privKey1, err := GeneratePrivateKey()
