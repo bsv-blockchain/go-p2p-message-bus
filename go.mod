@@ -125,3 +125,5 @@ require (
 )
 
 replace go.opentelemetry.io/otel/sdk => go.opentelemetry.io/otel/sdk v1.42.0
+
+replace google.golang.org/grpc v1.78.0 => google.golang.org/grpc v1.79.3
