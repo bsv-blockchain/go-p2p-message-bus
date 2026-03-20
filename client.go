@@ -57,19 +57,21 @@ var _ Client = (*client)(nil)
 
 // client represents a P2P messaging client implementation.
 type client struct {
-	config      Config
-	host        host.Host
-	dht         *dht.IpfsDHT
-	pubsub      *pubsub.PubSub
-	topics      map[string]*pubsub.Topic
-	subs        map[string]*pubsub.Subscription
-	msgChans    map[string]chan Message
-	mu          sync.RWMutex
-	peerTracker *peerTracker
-	ctx         context.Context //nolint:containedctx // Client manages its own lifecycle
-	cancel      context.CancelFunc
-	mdnsService mdns.Service
-	logger      logger
+	config           Config
+	host             host.Host
+	dht              *dht.IpfsDHT
+	pubsub           *pubsub.PubSub
+	topics           map[string]*pubsub.Topic
+	subs             map[string]*pubsub.Subscription
+	msgChans         map[string]chan Message
+	mu               sync.RWMutex
+	peerTracker      *peerTracker
+	ctx              context.Context //nolint:containedctx // Client manages its own lifecycle
+	cancel           context.CancelFunc
+	mdnsService      mdns.Service
+	logger           logger
+	routingDiscovery *drouting.RoutingDiscovery
+	discoverNow      chan struct{}
 }
 
 // NewClient creates and initializes a new P2P client.
@@ -121,8 +123,8 @@ func NewClient(config Config) (Client, error) {
 	connectToBootstrapPeers(ctx, h, bootstrapPeers, clientLogger)
 	loadAndConnectCachedPeers(ctx, h, config, clientLogger)
 
-	// Create pubsub
-	ps, err := pubsub.NewGossipSub(ctx, h)
+	// Create pubsub with peer exchange enabled
+	ps, err := pubsub.NewGossipSub(ctx, h, pubsub.WithPeerExchange(true))
 	if err != nil {
 		_ = h.Close()
 		cancel()
@@ -142,19 +144,26 @@ func NewClient(config Config) (Client, error) {
 		clientLogger.Infof("mDNS discovery disabled (production safe default)")
 	}
 
+	var routingDiscovery *drouting.RoutingDiscovery
+	if kadDHT != nil {
+		routingDiscovery = drouting.NewRoutingDiscovery(kadDHT)
+	}
+
 	c := &client{
-		config:      config,
-		host:        h,
-		dht:         kadDHT,
-		pubsub:      ps,
-		topics:      make(map[string]*pubsub.Topic),
-		subs:        make(map[string]*pubsub.Subscription),
-		msgChans:    make(map[string]chan Message),
-		peerTracker: newPeerTracker(),
-		ctx:         ctx,
-		cancel:      cancel,
-		mdnsService: mdnsService,
-		logger:      clientLogger,
+		config:           config,
+		host:             h,
+		dht:              kadDHT,
+		pubsub:           ps,
+		topics:           make(map[string]*pubsub.Topic),
+		subs:             make(map[string]*pubsub.Subscription),
+		msgChans:         make(map[string]chan Message),
+		peerTracker:      newPeerTracker(),
+		ctx:              ctx,
+		cancel:           cancel,
+		mdnsService:      mdnsService,
+		logger:           clientLogger,
+		routingDiscovery: routingDiscovery,
+		discoverNow:      make(chan struct{}, 1),
 	}
 
 	// Set up peer address request/response protocol handler
@@ -164,7 +173,6 @@ func NewClient(config Config) (Client, error) {
 
 	// Start DHT discovery (only if DHT is enabled)
 	if kadDHT != nil {
-		routingDiscovery := drouting.NewRoutingDiscovery(kadDHT)
 		go c.waitForDHTAndAdvertise(ctx, routingDiscovery)
 		go c.discoverPeers(ctx, routingDiscovery, true)
 	} else {
@@ -541,6 +549,12 @@ func (c *client) Subscribe(topic string) <-chan Message {
 		c.subs[topic] = sub
 		c.mu.Unlock()
 
+		// Trigger immediate discovery for the new topic
+		select {
+		case c.discoverNow <- struct{}{}:
+		default:
+		}
+
 		// Set up peer connection notifications for this topic
 		c.host.Network().Notify(&network.NotifyBundle{
 			ConnectedF: func(_ network.Network, conn network.Conn) {
@@ -712,7 +726,6 @@ func (c *client) Connect(ctx context.Context, peerMultiaddr string) error {
 
 // Internal methods
 
-//nolint:gocyclo // DHT advertising logic complexity is reasonable
 func (c *client) waitForDHTAndAdvertise(ctx context.Context, routingDiscovery *drouting.RoutingDiscovery) {
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
@@ -731,24 +744,26 @@ func (c *client) waitForDHTAndAdvertise(ctx context.Context, routingDiscovery *d
 			return
 		case <-ticker.C:
 			if c.dht != nil && len(c.dht.RoutingTable().ListPeers()) > 0 {
-				// Advertise on DHT for all topics
-				c.mu.RLock()
-				topicsCopy := make([]string, 0, len(c.topics))
-				for topic := range c.topics {
-					topicsCopy = append(topicsCopy, topic)
-				}
-				c.mu.RUnlock()
-
-				for _, topic := range topicsCopy {
-					_, err := routingDiscovery.Advertise(ctx, topic)
-					if err != nil {
-						c.logger.Warnf("Failed to advertise topic %s: %v", topic, err)
-					} else {
-						c.logger.Infof("Announcing presence on DHT for topic: %s", topic)
-					}
-				}
+				c.advertiseTopics(ctx, routingDiscovery)
 				return
 			}
+		}
+	}
+}
+
+func (c *client) advertiseTopics(ctx context.Context, routingDiscovery *drouting.RoutingDiscovery) {
+	c.mu.RLock()
+	topicsCopy := make([]string, 0, len(c.topics))
+	for topic := range c.topics {
+		topicsCopy = append(topicsCopy, topic)
+	}
+	c.mu.RUnlock()
+
+	for _, topic := range topicsCopy {
+		if _, err := routingDiscovery.Advertise(ctx, topic); err != nil {
+			c.logger.Warnf("Failed to advertise topic %s: %v", topic, err)
+		} else {
+			c.logger.Infof("Announcing presence on DHT for topic: %s", topic)
 		}
 	}
 }
@@ -768,6 +783,9 @@ func (c *client) discoverPeers(ctx context.Context, routingDiscovery *drouting.R
 		select {
 		case <-ctx.Done():
 			return
+		case <-c.discoverNow:
+			c.advertiseTopics(ctx, routingDiscovery)
+			c.findAndConnectPeers(ctx, routingDiscovery)
 		case <-ticker.C:
 			c.findAndConnectPeers(ctx, routingDiscovery)
 		}
