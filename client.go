@@ -859,6 +859,32 @@ func (c *client) shouldLogConnectionError(err error) bool {
 	return true
 }
 
+// allBootstrapConnected reports whether all bootstrap peers are currently connected.
+func (c *client) allBootstrapConnected(bootstrapPeers []peer.AddrInfo) bool {
+	for _, peerInfo := range bootstrapPeers {
+		if c.host.Network().Connectedness(peerInfo.ID) != network.Connected {
+			return false
+		}
+	}
+	return true
+}
+
+// reconnectDisconnectedBootstrap dials any bootstrap peer that is not currently connected.
+func (c *client) reconnectDisconnectedBootstrap(ctx context.Context, bootstrapPeers []peer.AddrInfo) {
+	for _, peerInfo := range bootstrapPeers {
+		if c.host.Network().Connectedness(peerInfo.ID) != network.Connected {
+			c.logger.Infof("Bootstrap peer %s disconnected, attempting reconnection", peerInfo.ID.String()[:16])
+			go func(pi peer.AddrInfo) {
+				if err := c.host.Connect(ctx, pi); err != nil {
+					c.logger.Warnf("Failed to reconnect to bootstrap peer %s: %v", pi.ID.String()[:16], err)
+				} else {
+					c.logger.Infof("Successfully reconnected to bootstrap peer %s", pi.ID.String()[:16])
+				}
+			}(peerInfo)
+		}
+	}
+}
+
 // maintainBootstrapConnections periodically checks bootstrap peer connections
 // and reconnects if they become disconnected. On startup, it retries every 5 seconds
 // for the first 2 minutes to handle simultaneous pod restarts where the initial
@@ -876,30 +902,6 @@ func (c *client) maintainBootstrapConnections(ctx context.Context, bootstrapPeer
 	fastTicker := time.NewTicker(5 * time.Second)
 	fastPhaseEnd := time.After(2 * time.Minute)
 
-	allConnected := func() bool {
-		for _, peerInfo := range bootstrapPeers {
-			if c.host.Network().Connectedness(peerInfo.ID) != network.Connected {
-				return false
-			}
-		}
-		return true
-	}
-
-	connectDisconnected := func() {
-		for _, peerInfo := range bootstrapPeers {
-			if c.host.Network().Connectedness(peerInfo.ID) != network.Connected {
-				c.logger.Infof("Bootstrap peer %s disconnected, attempting reconnection", peerInfo.ID.String()[:16])
-				go func(pi peer.AddrInfo) {
-					if err := c.host.Connect(ctx, pi); err != nil {
-						c.logger.Warnf("Failed to reconnect to bootstrap peer %s: %v", pi.ID.String()[:16], err)
-					} else {
-						c.logger.Infof("Successfully reconnected to bootstrap peer %s", pi.ID.String()[:16])
-					}
-				}(peerInfo)
-			}
-		}
-	}
-
 fastLoop:
 	for {
 		select {
@@ -910,12 +912,12 @@ fastLoop:
 			fastTicker.Stop()
 			break fastLoop
 		case <-fastTicker.C:
-			if allConnected() {
+			if c.allBootstrapConnected(bootstrapPeers) {
 				fastTicker.Stop()
 				c.logger.Infof("All bootstrap peers connected, switching to maintenance mode")
 				break fastLoop
 			}
-			connectDisconnected()
+			c.reconnectDisconnectedBootstrap(ctx, bootstrapPeers)
 		}
 	}
 
@@ -929,7 +931,7 @@ fastLoop:
 			c.logger.Infof("Bootstrap peer maintenance stopping")
 			return
 		case <-ticker.C:
-			connectDisconnected()
+			c.reconnectDisconnectedBootstrap(ctx, bootstrapPeers)
 		}
 	}
 }

@@ -2,7 +2,8 @@ package p2p
 
 import (
 	"bytes"
-	"log"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -24,6 +25,30 @@ type testClientConfig struct {
 	cleanupInterval time.Duration
 }
 
+// captureLogger is a mutex-safe logger that records log output to a buffer.
+// It is used in tests to capture logs written by background goroutines without races.
+type captureLogger struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (l *captureLogger) Debugf(format string, v ...any) { l.write("DEBUG", format, v...) }
+func (l *captureLogger) Infof(format string, v ...any)  { l.write("INFO", format, v...) }
+func (l *captureLogger) Warnf(format string, v ...any)  { l.write("WARN", format, v...) }
+func (l *captureLogger) Errorf(format string, v ...any) { l.write("ERROR", format, v...) }
+
+func (l *captureLogger) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.String()
+}
+
+func (l *captureLogger) write(level, format string, v ...any) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	fmt.Fprintf(&l.buf, "["+level+"] "+format+"\n", v...)
+}
+
 // createTestClient is a helper function that reduces duplication in client creation and log setup
 func createTestClient(t *testing.T, cfg testClientConfig) (Client, string) {
 	t.Helper()
@@ -31,17 +56,14 @@ func createTestClient(t *testing.T, cfg testClientConfig) (Client, string) {
 	privKey, err := GeneratePrivateKey()
 	require.NoError(t, err, "failed to generate private key")
 
-	// Capture log output
-	var buf bytes.Buffer
-	oldOutput := log.Writer()
-	log.SetOutput(&buf)
-	t.Cleanup(func() { log.SetOutput(oldOutput) })
+	tl := &captureLogger{}
 
 	config := Config{
 		Name:               cfg.name,
 		PrivateKey:         privKey,
 		DHTMode:            cfg.dhtMode,
 		DHTCleanupInterval: cfg.cleanupInterval,
+		Logger:             tl,
 	}
 
 	client, err := NewClient(config)
@@ -49,7 +71,7 @@ func createTestClient(t *testing.T, cfg testClientConfig) (Client, string) {
 	require.NotNil(t, client, "client should not be nil")
 	t.Cleanup(func() { _ = client.Close() })
 
-	return client, buf.String()
+	return client, tl.String()
 }
 
 // TestDHTModeSelection tests DHT mode configuration (server/client/default)

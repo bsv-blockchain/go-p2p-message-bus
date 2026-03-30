@@ -2,6 +2,7 @@ package p2p
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -256,12 +257,21 @@ func TestTwoPeersDiscoverViaDirectConnect(t *testing.T) {
 		require.NoError(t, cl2.Close())
 	}()
 
-	// Get peer1's address and connect peer2 directly
+	// Get peer1's address and connect peer2 directly.
+	// Prefer loopback to avoid flaky failures when non-loopback interfaces
+	// (e.g. Tailscale) are present but unreliable in the test environment.
 	c1 := cl1.(*client)
 	addrs := c1.host.Addrs()
 	require.NotEmpty(t, addrs, "peer1 should have listen addresses")
 
-	connectAddr := fmt.Sprintf("%s/p2p/%s", addrs[0].String(), c1.host.ID().String())
+	addrBase := addrs[0]
+	for _, a := range addrs {
+		if strings.Contains(a.String(), "127.0.0.1") {
+			addrBase = a
+			break
+		}
+	}
+	connectAddr := fmt.Sprintf("%s/p2p/%s", addrBase.String(), c1.host.ID().String())
 	err = cl2.Connect(cl2.(*client).ctx, connectAddr)
 	require.NoError(t, err)
 
