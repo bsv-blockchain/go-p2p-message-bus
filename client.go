@@ -1026,6 +1026,25 @@ func (c *client) tryConnectToTopicPeer(peerID peer.ID) {
 	}
 }
 
+// handleMalformedMessage records a malformed message from a peer, logs a
+// debug entry with diagnostic context, and emits a single WARN when the peer
+// first crosses the malformed-message threshold. Subsequent messages from
+// peers past the threshold should be dropped by the caller via
+// peerTracker.shouldSkipMalformed without invoking this helper.
+func (c *client) handleMalformedMessage(author peer.ID, topicName string, data []byte, err error) {
+	preview := data
+	if len(preview) > 128 {
+		preview = preview[:128]
+	}
+	count, justSkipped := c.peerTracker.recordMalformed(author)
+	c.logger.Debugf("Malformed message from %s (%s) on topic %s: %v (count=%d, len=%d, preview=%q, hex=%x)",
+		c.peerTracker.getName(author), author.String(), topicName, err, count, len(data), preview, data)
+	if justSkipped {
+		c.logger.Warnf("Skipping peer %s (%s) on topic %s: %d malformed messages exceeded threshold",
+			c.peerTracker.getName(author), author.String(), topicName, count)
+	}
+}
+
 func (c *client) receiveMessages(sub *pubsub.Subscription, topic *pubsub.Topic, msgChan chan Message) {
 	for {
 		msg, err := sub.Next(c.ctx)
@@ -1042,13 +1061,18 @@ func (c *client) receiveMessages(sub *pubsub.Subscription, topic *pubsub.Topic, 
 			continue
 		}
 
+		// Drop messages from peers that have exceeded the malformed threshold.
+		if c.peerTracker.shouldSkipMalformed(author) {
+			continue
+		}
+
 		// Unmarshal message
 		var m struct {
 			Name string `json:"name"`
 			Data []byte `json:"data"`
 		}
 		if err := json.Unmarshal(msg.Data, &m); err != nil {
-			c.logger.Errorf("Error unmarshaling message: %v", err)
+			c.handleMalformedMessage(author, topic.String(), msg.Data, err)
 			continue
 		}
 

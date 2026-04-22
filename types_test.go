@@ -28,12 +28,54 @@ func TestNewPeerTracker(t *testing.T) {
 	require.NotNil(t, tracker.isRelaying)
 	require.NotNil(t, tracker.topicPeers)
 	require.NotNil(t, tracker.lastSeen)
+	require.NotNil(t, tracker.malformed)
+	require.NotNil(t, tracker.skipMalformed)
 
 	// Verify maps are empty
 	assert.Empty(t, tracker.names)
 	assert.Empty(t, tracker.isRelaying)
 	assert.Empty(t, tracker.topicPeers)
 	assert.Empty(t, tracker.lastSeen)
+	assert.Empty(t, tracker.malformed)
+	assert.Empty(t, tracker.skipMalformed)
+}
+
+func TestPeerTrackerRecordMalformed(t *testing.T) {
+	tracker := newPeerTracker()
+	peerID := generateTestPeerID(t)
+
+	assert.False(t, tracker.shouldSkipMalformed(peerID), "fresh peer must not be skipped")
+
+	for i := 1; i < malformedThreshold; i++ {
+		count, justSkipped := tracker.recordMalformed(peerID)
+		assert.Equal(t, i, count)
+		assert.False(t, justSkipped, "should not trip skip before threshold")
+		assert.False(t, tracker.shouldSkipMalformed(peerID))
+	}
+
+	count, justSkipped := tracker.recordMalformed(peerID)
+	assert.Equal(t, malformedThreshold, count)
+	assert.True(t, justSkipped, "should trip skip at threshold")
+	assert.True(t, tracker.shouldSkipMalformed(peerID))
+
+	// Subsequent calls must not re-trigger justSkipped.
+	count, justSkipped = tracker.recordMalformed(peerID)
+	assert.Equal(t, malformedThreshold+1, count)
+	assert.False(t, justSkipped, "skip transition should fire only once")
+	assert.True(t, tracker.shouldSkipMalformed(peerID))
+}
+
+func TestPeerTrackerRecordMalformedIsolatesPeers(t *testing.T) {
+	tracker := newPeerTracker()
+	bad := generateTestPeerID(t)
+	good := generateTestPeerID(t)
+
+	for i := 0; i < malformedThreshold; i++ {
+		tracker.recordMalformed(bad)
+	}
+
+	assert.True(t, tracker.shouldSkipMalformed(bad))
+	assert.False(t, tracker.shouldSkipMalformed(good), "unrelated peer must not be skipped")
 }
 
 func TestPeerTrackerUpdateName(t *testing.T) {
