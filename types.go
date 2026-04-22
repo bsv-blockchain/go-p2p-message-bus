@@ -61,21 +61,53 @@ type cachedPeer struct {
 	LastSeen time.Time `json:"last_seen"`
 }
 
+// malformedThreshold is the number of malformed messages tolerated from a peer
+// before it is skipped. A single WARN is logged on transition to skipped state;
+// subsequent malformed messages from that peer are dropped silently.
+const malformedThreshold = 5
+
 type peerTracker struct {
-	mu         sync.RWMutex
-	names      map[peer.ID]string
-	isRelaying map[string]bool
-	topicPeers map[peer.ID]bool
-	lastSeen   map[peer.ID]time.Time
+	mu            sync.RWMutex
+	names         map[peer.ID]string
+	isRelaying    map[string]bool
+	topicPeers    map[peer.ID]bool
+	lastSeen      map[peer.ID]time.Time
+	malformed     map[peer.ID]int
+	skipMalformed map[peer.ID]bool
 }
 
 func newPeerTracker() *peerTracker {
 	return &peerTracker{
-		names:      make(map[peer.ID]string),
-		isRelaying: make(map[string]bool),
-		topicPeers: make(map[peer.ID]bool),
-		lastSeen:   make(map[peer.ID]time.Time),
+		names:         make(map[peer.ID]string),
+		isRelaying:    make(map[string]bool),
+		topicPeers:    make(map[peer.ID]bool),
+		lastSeen:      make(map[peer.ID]time.Time),
+		malformed:     make(map[peer.ID]int),
+		skipMalformed: make(map[peer.ID]bool),
 	}
+}
+
+// recordMalformed increments the malformed message count for a peer.
+// Returns the new count and whether this call transitioned the peer into
+// the skip state (i.e., this is the first time threshold was exceeded).
+func (pt *peerTracker) recordMalformed(peerID peer.ID) (count int, justSkipped bool) {
+	pt.mu.Lock()
+	defer pt.mu.Unlock()
+	pt.malformed[peerID]++
+	c := pt.malformed[peerID]
+	if c >= malformedThreshold && !pt.skipMalformed[peerID] {
+		pt.skipMalformed[peerID] = true
+		return c, true
+	}
+	return c, false
+}
+
+// shouldSkipMalformed reports whether the peer has exceeded the malformed
+// threshold and should have its messages dropped silently.
+func (pt *peerTracker) shouldSkipMalformed(peerID peer.ID) bool {
+	pt.mu.RLock()
+	defer pt.mu.RUnlock()
+	return pt.skipMalformed[peerID]
 }
 
 func (pt *peerTracker) updateName(peerID peer.ID, name string) {

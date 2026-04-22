@@ -1042,13 +1042,28 @@ func (c *client) receiveMessages(sub *pubsub.Subscription, topic *pubsub.Topic, 
 			continue
 		}
 
+		// Drop messages from peers that have exceeded the malformed threshold.
+		if c.peerTracker.shouldSkipMalformed(author) {
+			continue
+		}
+
 		// Unmarshal message
 		var m struct {
 			Name string `json:"name"`
 			Data []byte `json:"data"`
 		}
 		if err := json.Unmarshal(msg.Data, &m); err != nil {
-			c.logger.Errorf("Error unmarshaling message: %v", err)
+			preview := msg.Data
+			if len(preview) > 128 {
+				preview = preview[:128]
+			}
+			count, justSkipped := c.peerTracker.recordMalformed(author)
+			c.logger.Debugf("Malformed message from %s (%s) on topic %s: %v (count=%d, len=%d, preview=%q, hex=%x)",
+				c.peerTracker.getName(author), author.String(), topic.String(), err, count, len(msg.Data), preview, msg.Data)
+			if justSkipped {
+				c.logger.Warnf("Skipping peer %s (%s) on topic %s: %d malformed messages exceeded threshold",
+					c.peerTracker.getName(author), author.String(), topic.String(), count)
+			}
 			continue
 		}
 
