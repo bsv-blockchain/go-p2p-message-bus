@@ -83,6 +83,22 @@ type Config struct {
 	// }
 	BootstrapPeers []string
 
+	// StaticPeers is an optional list of multiaddr strings for peers the client
+	// should always be connected to. Unlike BootstrapPeers, static peers are not
+	// used for DHT bootstrapping and not used as relay peers; they are simply
+	// dialed at startup and re-dialed by a maintenance loop if the connection
+	// drops. Use this for known trusted peers in private/closed networks where
+	// you want guaranteed direct connectivity regardless of DHT state.
+	//
+	// Static peers are dialed in addition to BootstrapPeers; the two lists may
+	// overlap without harm.
+	//
+	// Example: []string{
+	//   "/dns4/peer1.internal/tcp/9905/p2p/12D3KooW...",
+	//   "/ip4/192.168.1.10/tcp/9905/p2p/12D3KooW...",
+	// }
+	StaticPeers []string
+
 	// DHTMode specifies how this node participates in the DHT.
 	// Valid values: "server", "client", "off"
 	//

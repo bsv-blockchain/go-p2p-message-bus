@@ -121,6 +121,18 @@ func NewClient(config Config) (Client, error) {
 
 	// Connect to bootstrap peers (which are also used as relay peers)
 	connectToBootstrapPeers(ctx, h, bootstrapPeers, clientLogger)
+
+	// Static peers are dialed independently of bootstrap. Unlike bootstrap
+	// peers they aren't fed into the DHT or used as relays - they're just
+	// persistent direct connections we want to keep alive. Parsing happens
+	// here so a malformed entry is a startup-time error rather than a runtime
+	// surprise.
+	staticPeers := parsePeerMultiaddrs(config.StaticPeers, clientLogger)
+	if len(staticPeers) > 0 {
+		clientLogger.Infof("Configured %d static peer(s)", len(staticPeers))
+		connectToStaticPeers(ctx, h, staticPeers, clientLogger)
+	}
+
 	loadAndConnectCachedPeers(ctx, h, config, clientLogger)
 
 	// Create pubsub with peer exchange enabled
@@ -174,6 +186,11 @@ func NewClient(config Config) (Client, error) {
 	// Always maintain bootstrap peer connections - ensures reconnection after
 	// simultaneous restarts where the initial one-shot bootstrap dial fails
 	go c.maintainBootstrapConnections(ctx, bootstrapPeers)
+
+	// Same idea for static peers, when configured.
+	if len(staticPeers) > 0 {
+		go c.maintainStaticConnections(ctx, staticPeers)
+	}
 
 	// Start DHT discovery (only if DHT is enabled)
 	if kadDHT != nil {
@@ -486,6 +503,22 @@ func connectToBootstrapPeers(ctx context.Context, h host.Host, peers []peer.Addr
 				log.Warnf("Failed to connect to bootstrap peer %s (%v): %v", pi.ID.String()[:16], pi.Addrs, connectErr)
 			} else {
 				log.Infof("Connected to bootstrap peer: %s", pi.ID.String())
+			}
+		}(peerInfo)
+	}
+}
+
+// connectToStaticPeers dials each configured static peer once at startup. It
+// is the static-peer counterpart of connectToBootstrapPeers; the maintenance
+// goroutine started by maintainStaticConnections is what actually keeps
+// these connections alive long-term.
+func connectToStaticPeers(ctx context.Context, h host.Host, peers []peer.AddrInfo, log logger) {
+	for _, peerInfo := range peers {
+		go func(pi peer.AddrInfo) {
+			if connectErr := h.Connect(ctx, pi); connectErr != nil {
+				log.Warnf("Failed to connect to static peer %s (%v): %v", pi.ID.String()[:16], pi.Addrs, connectErr)
+			} else {
+				log.Infof("Connected to static peer: %s", pi.ID.String())
 			}
 		}(peerInfo)
 	}
@@ -881,6 +914,84 @@ func (c *client) reconnectDisconnectedBootstrap(ctx context.Context, bootstrapPe
 					c.logger.Infof("Successfully reconnected to bootstrap peer %s", pi.ID.String()[:16])
 				}
 			}(peerInfo)
+		}
+	}
+}
+
+// allStaticConnected reports whether all static peers are currently connected.
+func (c *client) allStaticConnected(staticPeers []peer.AddrInfo) bool {
+	for _, peerInfo := range staticPeers {
+		if c.host.Network().Connectedness(peerInfo.ID) != network.Connected {
+			return false
+		}
+	}
+	return true
+}
+
+// reconnectDisconnectedStatic dials any static peer that is not currently connected.
+func (c *client) reconnectDisconnectedStatic(ctx context.Context, staticPeers []peer.AddrInfo) {
+	for _, peerInfo := range staticPeers {
+		if c.host.Network().Connectedness(peerInfo.ID) != network.Connected {
+			c.logger.Infof("Static peer %s disconnected, attempting reconnection", peerInfo.ID.String()[:16])
+			go func(pi peer.AddrInfo) {
+				if err := c.host.Connect(ctx, pi); err != nil {
+					c.logger.Warnf("Failed to reconnect to static peer %s: %v", pi.ID.String()[:16], err)
+				} else {
+					c.logger.Infof("Successfully reconnected to static peer %s", pi.ID.String()[:16])
+				}
+			}(peerInfo)
+		}
+	}
+}
+
+// maintainStaticConnections periodically checks static peer connections and
+// reconnects if they become disconnected. Mirrors maintainBootstrapConnections
+// with the same fast-then-steady cadence so cold starts (where peers may not
+// yet be listening) and long-running churn are both covered.
+func (c *client) maintainStaticConnections(ctx context.Context, staticPeers []peer.AddrInfo) {
+	if len(staticPeers) == 0 {
+		c.logger.Debugf("No static peers to maintain")
+		return
+	}
+
+	c.logger.Infof("Starting static peer maintenance for %d peers", len(staticPeers))
+
+	// Fast retry phase: check every 5s for the first 2 minutes. Same rationale
+	// as the bootstrap maintenance loop - simultaneous restarts mean the
+	// initial one-shot dial often fails before the peer is listening.
+	fastTicker := time.NewTicker(5 * time.Second)
+	fastPhaseEnd := time.After(2 * time.Minute)
+
+fastLoop:
+	for {
+		select {
+		case <-ctx.Done():
+			fastTicker.Stop()
+			return
+		case <-fastPhaseEnd:
+			fastTicker.Stop()
+			break fastLoop
+		case <-fastTicker.C:
+			if c.allStaticConnected(staticPeers) {
+				fastTicker.Stop()
+				c.logger.Infof("All static peers connected, switching to maintenance mode")
+				break fastLoop
+			}
+			c.reconnectDisconnectedStatic(ctx, staticPeers)
+		}
+	}
+
+	// Steady-state maintenance: check every 30s.
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			c.logger.Infof("Static peer maintenance stopping")
+			return
+		case <-ticker.C:
+			c.reconnectDisconnectedStatic(ctx, staticPeers)
 		}
 	}
 }
