@@ -289,7 +289,7 @@ func TestConnectToDiscoveredPeerWithRealConnection(t *testing.T) {
 	require.NoError(t, err)
 
 	config1 := Config{
-		Name:       "peer1",
+		Name:       testPeerName1,
 		PrivateKey: privKey1,
 		Port:       0,
 	}

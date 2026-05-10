@@ -16,7 +16,7 @@ func TestClientGetPeersWithTopicPeers(t *testing.T) {
 	require.NoError(t, err)
 
 	config1 := Config{
-		Name:       "peer1",
+		Name:       testPeerName1,
 		PrivateKey: privKey1,
 	}
 
@@ -156,7 +156,7 @@ func TestClientPeerCachePersistence(t *testing.T) {
 	// Pre-populate cache with a peer
 	cachedPeers := []cachedPeer{
 		{
-			ID:       "QmYyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N",
+			ID:       testPeerID1,
 			Name:     "existing-peer",
 			Addrs:    []string{"/ip4/127.0.0.1/tcp/4001"},
 			LastSeen: time.Now(),
@@ -200,7 +200,7 @@ func TestClientSavePeerCacheMergesExistingData(t *testing.T) {
 	// Pre-populate cache
 	existingPeers := []cachedPeer{
 		{
-			ID:       "QmYyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N",
+			ID:       testPeerID1,
 			Name:     "old-peer",
 			Addrs:    []string{"/ip4/192.168.1.1/tcp/4001"},
 			LastSeen: time.Now().Add(-48 * time.Hour),
