@@ -305,7 +305,7 @@ func TestEvictStalePeersEdgeCaseTiny(t *testing.T) {
 
 	peers := []cachedPeer{
 		{
-			ID:       "peer1",
+			ID:       testPeerName1,
 			LastSeen: now.Add(-10 * time.Second),
 		},
 	}

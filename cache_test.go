@@ -37,8 +37,8 @@ func TestLoadPeerCacheValidFile(t *testing.T) {
 			name: "single peer",
 			cacheData: []cachedPeer{
 				{
-					ID:       "QmYyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N",
-					Name:     "peer1",
+					ID:       testPeerID1,
+					Name:     testPeerName1,
 					Addrs:    []string{testAddrLocalhost},
 					LastSeen: time.Now(),
 				},
@@ -50,8 +50,8 @@ func TestLoadPeerCacheValidFile(t *testing.T) {
 			name: "multiple peers",
 			cacheData: []cachedPeer{
 				{
-					ID:       "QmYyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N",
-					Name:     "peer1",
+					ID:       testPeerID1,
+					Name:     testPeerName1,
 					Addrs:    []string{testAddrLocalhost},
 					LastSeen: time.Now(),
 				},
@@ -69,8 +69,8 @@ func TestLoadPeerCacheValidFile(t *testing.T) {
 			name: "negative TTL disables eviction",
 			cacheData: []cachedPeer{
 				{
-					ID:       "QmYyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N",
-					Name:     "peer1",
+					ID:       testPeerID1,
+					Name:     testPeerName1,
 					Addrs:    []string{testAddrLocalhost},
 					LastSeen: time.Now().Add(-48 * time.Hour), // Old peer
 				},
@@ -150,7 +150,7 @@ func TestSavePeerCacheValidData(t *testing.T) {
 			name: "single peer",
 			peers: []cachedPeer{
 				{
-					ID:       "QmYyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N",
+					ID:       testPeerID1,
 					Name:     "alice",
 					Addrs:    []string{testAddrLocalhost},
 					LastSeen: time.Now(),
@@ -161,7 +161,7 @@ func TestSavePeerCacheValidData(t *testing.T) {
 			name: "multiple peers",
 			peers: []cachedPeer{
 				{
-					ID:       "QmYyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N",
+					ID:       testPeerID1,
 					Name:     "alice",
 					Addrs:    []string{testAddrLocalhost},
 					LastSeen: time.Now(),
@@ -218,8 +218,8 @@ func TestSavePeerCacheInvalidPath(_ *testing.T) {
 
 	peers := []cachedPeer{
 		{
-			ID:       "QmYyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N",
-			Name:     "peer1",
+			ID:       testPeerID1,
+			Name:     testPeerName1,
 			Addrs:    []string{testAddrLocalhost},
 			LastSeen: time.Now(),
 		},
@@ -244,7 +244,7 @@ func TestEvictStalePeersWithTTL(t *testing.T) {
 			name: "all peers are fresh",
 			peers: []cachedPeer{
 				{
-					ID:       "QmYyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N",
+					ID:       testPeerID1,
 					LastSeen: now.Add(-1 * time.Hour),
 				},
 				{
@@ -260,7 +260,7 @@ func TestEvictStalePeersWithTTL(t *testing.T) {
 			name: "some peers are stale",
 			peers: []cachedPeer{
 				{
-					ID:       "QmYyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N",
+					ID:       testPeerID1,
 					LastSeen: now.Add(-1 * time.Hour),
 				},
 				{
@@ -280,7 +280,7 @@ func TestEvictStalePeersWithTTL(t *testing.T) {
 			name: "all peers are stale",
 			peers: []cachedPeer{
 				{
-					ID:       "QmYyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N",
+					ID:       testPeerID1,
 					LastSeen: now.Add(-48 * time.Hour),
 				},
 				{
@@ -296,7 +296,7 @@ func TestEvictStalePeersWithTTL(t *testing.T) {
 			name: "zero LastSeen timestamp is kept",
 			peers: []cachedPeer{
 				{
-					ID:       "QmYyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N",
+					ID:       testPeerID1,
 					LastSeen: time.Time{}, // Zero value
 				},
 			},
@@ -308,7 +308,7 @@ func TestEvictStalePeersWithTTL(t *testing.T) {
 			name: "mixed zero and valid timestamps",
 			peers: []cachedPeer{
 				{
-					ID:       "QmYyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N",
+					ID:       testPeerID1,
 					LastSeen: time.Time{}, // Zero value
 				},
 				{
@@ -361,7 +361,7 @@ func TestEvictStalePeersEdgeCases(t *testing.T) {
 			name: "TTL exactly at boundary",
 			peers: []cachedPeer{
 				{
-					ID:       "QmYyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N",
+					ID:       testPeerID1,
 					LastSeen: now.Add(-24 * time.Hour),
 				},
 			},
@@ -372,7 +372,7 @@ func TestEvictStalePeersEdgeCases(t *testing.T) {
 			name: "TTL just within boundary",
 			peers: []cachedPeer{
 				{
-					ID:       "QmYyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N",
+					ID:       testPeerID1,
 					LastSeen: now.Add(-24*time.Hour + 1*time.Second),
 				},
 			},
@@ -404,7 +404,7 @@ func TestLoadPeerCacheWithTTLEviction(t *testing.T) {
 			name: "fresh peers loaded",
 			cacheData: []cachedPeer{
 				{
-					ID:       "peer1",
+					ID:       testPeerName1,
 					Name:     "alice",
 					Addrs:    []string{testAddrLocalhost},
 					LastSeen: now.Add(-1 * time.Hour),
@@ -417,7 +417,7 @@ func TestLoadPeerCacheWithTTLEviction(t *testing.T) {
 			name: "stale peers evicted on load",
 			cacheData: []cachedPeer{
 				{
-					ID:       "peer1",
+					ID:       testPeerName1,
 					Name:     "alice",
 					Addrs:    []string{testAddrLocalhost},
 					LastSeen: now.Add(-48 * time.Hour),
@@ -430,7 +430,7 @@ func TestLoadPeerCacheWithTTLEviction(t *testing.T) {
 			name: "mixed fresh and stale peers",
 			cacheData: []cachedPeer{
 				{
-					ID:       "peer1",
+					ID:       testPeerName1,
 					Name:     "alice",
 					Addrs:    []string{testAddrLocalhost},
 					LastSeen: now.Add(-1 * time.Hour),
@@ -476,8 +476,8 @@ func TestSavePeerCacheFilePermissions(t *testing.T) {
 
 	peers := []cachedPeer{
 		{
-			ID:       "QmYyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N",
-			Name:     "peer1",
+			ID:       testPeerID1,
+			Name:     testPeerName1,
 			Addrs:    []string{testAddrLocalhost},
 			LastSeen: time.Now(),
 		},
@@ -501,7 +501,7 @@ func TestLoadAndSavePeerCacheRoundTrip(t *testing.T) {
 
 	originalPeers := []cachedPeer{
 		{
-			ID:       "QmYyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N",
+			ID:       testPeerID1,
 			Name:     "alice",
 			Addrs:    []string{testAddrLocalhost},
 			LastSeen: now,

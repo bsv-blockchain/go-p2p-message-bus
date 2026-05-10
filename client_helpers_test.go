@@ -12,7 +12,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const testLocalMultiaddr = "/ip4/127.0.0.1/tcp/4001"
+const (
+	testLocalMultiaddr = "/ip4/127.0.0.1/tcp/4001"
+	testPeerID1        = "QmYyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N"
+	testPeerName1      = "peer1"
+)
 
 func TestParseMultiaddrs(t *testing.T) {
 	tests := []struct {
@@ -118,7 +122,7 @@ func TestConnectToCachedPeers(t *testing.T) {
 			setupPeers: func() []cachedPeer {
 				return []cachedPeer{
 					{
-						ID:    "QmYyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N",
+						ID:    testPeerID1,
 						Name:  "test",
 						Addrs: []string{},
 					},
@@ -131,7 +135,7 @@ func TestConnectToCachedPeers(t *testing.T) {
 			setupPeers: func() []cachedPeer {
 				return []cachedPeer{
 					{
-						ID:    "QmYyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N",
+						ID:    testPeerID1,
 						Name:  "test",
 						Addrs: []string{"invalid-multiaddr"},
 					},

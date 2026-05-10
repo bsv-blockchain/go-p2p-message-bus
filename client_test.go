@@ -439,7 +439,7 @@ func TestClientWithSamePeerID(t *testing.T) {
 
 	// Create first client
 	config1 := Config{
-		Name:       "peer1",
+		Name:       testPeerName1,
 		PrivateKey: privKey,
 	}
 
@@ -475,7 +475,7 @@ func TestClientWithDifferentPeerIDs(t *testing.T) {
 
 	// Create first client
 	config1 := Config{
-		Name:       "peer1",
+		Name:       testPeerName1,
 		PrivateKey: privKey1,
 	}
 
