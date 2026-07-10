@@ -348,7 +348,8 @@ func buildHostOptions(config Config, log logger, cancel context.CancelFunc) ([]l
 }
 
 func createHost(_ context.Context, hostOpts []libp2p.Option, config Config, relayPeers []peer.AddrInfo, log logger, cancel context.CancelFunc) (host.Host, error) {
-	hostOpts = append(hostOpts,
+	hostOpts = append(
+		hostOpts,
 		libp2p.ListenAddrStrings(
 			fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", config.Port),
 			fmt.Sprintf("/ip6/::/tcp/%d", config.Port),
@@ -358,7 +359,8 @@ func createHost(_ context.Context, hostOpts []libp2p.Option, config Config, rela
 	// Enable NAT features only if explicitly enabled
 	// UPnP/NAT-PMP scans the local gateway which triggers network scanning alerts
 	if config.EnableNAT {
-		hostOpts = append(hostOpts,
+		hostOpts = append(
+			hostOpts,
 			libp2p.NATPortMap(),
 			libp2p.EnableNATService(),
 			libp2p.EnableHolePunching(),
@@ -368,7 +370,8 @@ func createHost(_ context.Context, hostOpts []libp2p.Option, config Config, rela
 		log.Infof("UPnP/NAT-PMP disabled (production safe default)")
 	}
 
-	hostOpts = append(hostOpts,
+	hostOpts = append(
+		hostOpts,
 		libp2p.EnableRelay(),
 		libp2p.EnableAutoRelayWithStaticRelays(relayPeers),
 	)
