@@ -19,8 +19,6 @@ import (
 	"testing"
 	"time"
 
-	ds "github.com/ipfs/go-datastore"
-	dssync "github.com/ipfs/go-datastore/sync"
 	"github.com/libp2p/go-libp2p"
 	dht "github.com/libp2p/go-libp2p-kad-dht"
 	"github.com/libp2p/go-libp2p-kad-dht/records"
@@ -407,30 +405,16 @@ func setupDHT(ctx context.Context, h host.Host, config Config, bootstrapPeers []
 		dht.BootstrapPeers(bootstrapPeers...),
 	}
 
-	// If server mode and custom cleanup interval specified, configure ProviderManager
+	// If server mode and custom cleanup interval specified, configure the
+	// built-in provider manager's cleanup interval. Custom ProviderStore
+	// implementations can no longer be injected; the DHT always runs the
+	// built-in provider manager, configured via ProviderManagerOpts.
 	if mode == dht.ModeServer && config.DHTCleanupInterval > 0 {
 		log.Infof("Configuring DHT cleanup interval: %v", config.DHTCleanupInterval)
-
-		// Create an in-memory datastore for the provider manager
-		// Same as default DHT datastore creation
-		datastore := dssync.MutexWrap(ds.NewMapDatastore())
-
-		providerManager, err := records.NewProviderManager(
-			ctx,
-			h.ID(),
-			h.Peerstore(),
-			datastore,
-			records.CleanupInterval(config.DHTCleanupInterval),
-		)
-		if err != nil {
-			_ = h.Close()
-			cancel()
-			return nil, fmt.Errorf("failed to create provider manager: %w", err)
-		}
-		dhtOpts = append(dhtOpts, dht.ProviderStore(providerManager))
+		dhtOpts = append(dhtOpts, dht.ProviderManagerOpts(records.CleanupInterval(config.DHTCleanupInterval)))
 	}
 
-	kadDHT, err := dht.New(ctx, h, dhtOpts...)
+	kadDHT, err := dht.New(h, dhtOpts...)
 	if err != nil {
 		_ = h.Close()
 		cancel()
