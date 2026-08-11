@@ -131,8 +131,16 @@ func NewClient(config Config) (Client, error) {
 
 	loadAndConnectCachedPeers(ctx, h, config, clientLogger)
 
-	// Create pubsub with peer exchange enabled
-	ps, err := pubsub.NewGossipSub(ctx, h, pubsub.WithPeerExchange(true))
+	// Create pubsub. Peer exchange is on by default; peer scoring (Sybil defence)
+	// is applied when configured. See buildPubSubOptions / EnablePeerScoring.
+	psOpts, err := buildPubSubOptions(config, clientLogger)
+	if err != nil {
+		_ = h.Close()
+		cancel()
+		return nil, fmt.Errorf("invalid pubsub configuration: %w", err)
+	}
+
+	ps, err := pubsub.NewGossipSub(ctx, h, psOpts...)
 	if err != nil {
 		_ = h.Close()
 		cancel()
