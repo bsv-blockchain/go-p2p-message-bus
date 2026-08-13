@@ -4,7 +4,9 @@ import (
 	"log"
 	"time"
 
+	pubsub "github.com/libp2p/go-libp2p-pubsub"
 	"github.com/libp2p/go-libp2p/core/crypto"
+	"github.com/libp2p/go-libp2p/core/peer"
 )
 
 // logger defines the interface for logging in the P2P client.
@@ -181,4 +183,58 @@ type Config struct {
 	// This prevents rapid connect/disconnect cycles.
 	// If not provided or zero, defaults to 20 seconds.
 	ConnectionGracePeriod time.Duration
+
+	// EnablePeerScoring turns on GossipSub peer scoring using the library's built-in
+	// defaults (DefaultPeerScoreParams / DefaultPeerScoreThresholds). Peer scoring is
+	// what protects the mesh from Sybil peers: it applies an IP-colocation penalty and
+	// a behaviour penalty for GRAFT/PRUNE flooding and broken IWANT promises, and it
+	// gates peer exchange so peer records offered via PRUNE are rejected from any peer
+	// that has earned a negative score (a Sybil swarm behind few IPs, or a misbehaving
+	// peer). StaticPeers and BootstrapPeers are registered as GossipSub direct peers so
+	// scoring can never prune or graylist trusted links.
+	//
+	// The gossipsub v1.1 spec requires scoring whenever peer exchange is on; leaving
+	// this false while peer exchange stays enabled (the default) lets Sybil peers
+	// capture the topic mesh at no cost. Prefer enabling this, or set
+	// DisablePeerExchange, in any deployment exposed to untrusted peers.
+	//
+	// The defaults are penalty-only: a well-behaved peer sits at score 0, and only
+	// misbehaviour or IP colocation drives a score negative. To award positive score
+	// to specific peers, or to add per-topic scoring, set PeerScoreParams /
+	// AppSpecificScore. Default: false (no scoring, for backwards compatibility).
+	EnablePeerScoring bool
+
+	// PeerScoreParams optionally overrides the GossipSub peer score parameters. When
+	// set, both this and PeerScoreThresholds must be provided. Setting this enables
+	// peer scoring even if EnablePeerScoring is false. Use DefaultPeerScoreParams() as
+	// a starting point and add per-topic TopicScoreParams (e.g. positive
+	// TimeInMeshWeight / FirstMessageDeliveriesWeight, or a negative
+	// InvalidMessageDeliveriesWeight) for your topics.
+	PeerScoreParams *pubsub.PeerScoreParams
+
+	// PeerScoreThresholds optionally overrides the GossipSub peer score thresholds.
+	// When set, both this and PeerScoreParams must be provided.
+	PeerScoreThresholds *pubsub.PeerScoreThresholds
+
+	// AppSpecificScore optionally provides an application-specific score for a peer,
+	// added to its GossipSub score (weighted by PeerScoreParams.AppSpecificWeight = 1
+	// in the defaults). Use it to award positive score to trusted peers so transient
+	// penalties cannot push them below the mesh-eligibility threshold. It is only used
+	// when scoring is enabled; if set it overrides the params' AppSpecificScore.
+	AppSpecificScore func(peer.ID) float64
+
+	// PeerScoreInspect, if set, is called periodically with a snapshot of every peer's
+	// score, for observability (e.g. exporting metrics or logging graylisted peers).
+	// Only used when scoring is enabled. The period defaults to 10s.
+	PeerScoreInspect func(map[peer.ID]*pubsub.PeerScoreSnapshot)
+
+	// PeerScoreInspectPeriod is how often PeerScoreInspect is called. Defaults to 10s.
+	PeerScoreInspectPeriod time.Duration
+
+	// DisablePeerExchange turns off GossipSub peer exchange (PX). PX is enabled by
+	// default. Without peer scoring, PX is strictly worse than no PX because a
+	// zero AcceptPXThreshold makes the node dial every peer record an attacker hands
+	// it in a PRUNE. Set this to true as an interim mitigation when peer scoring is not
+	// enabled. Default: false (peer exchange enabled).
+	DisablePeerExchange bool
 }
