@@ -22,10 +22,10 @@ var ErrIncompletePeerScoreConfig = errors.New("PeerScoreParams and PeerScoreThre
 //   - IPColocationFactor penalizes many peers sharing the same IP address, so an
 //     attacker cannot cheaply run a swarm of Sybils from a handful of hosts.
 //   - BehaviourPenalty punishes GRAFT/PRUNE flooding and broken IWANT promises,
-//     re-enabling gossipsub's own flood defences (which are no-ops when scoring is off).
+//     re-enabling gossipsub's own flood defenses (which are no-ops when scoring is off).
 //
 // The scheme is penalty-only: a well-behaved peer sits at score 0 and only
-// misbehaviour or colocation drives its score negative. There are no positive terms
+// misbehavior or colocation drives its score negative. There are no positive terms
 // (no per-topic TopicScoreParams, AppSpecificScore returns 0), so no peer scores above
 // 0 by default. Callers who want a positive buffer for honest/trusted peers should set
 // per-topic TimeInMeshWeight/FirstMessageDeliveriesWeight and/or Config.AppSpecificScore.
@@ -49,7 +49,7 @@ func DefaultPeerScoreParams() *pubsub.PeerScoreParams {
 		IPColocationFactorWeight:    -35,
 		IPColocationFactorThreshold: 10,
 
-		// Penalize protocol misbehaviour (excess GRAFT, broken IWANT promises). Only
+		// Penalize protocol misbehavior (excess GRAFT, broken IWANT promises). Only
 		// the surplus over the threshold is penalized, so bursts under heavy gossip are
 		// tolerated before any penalty applies.
 		BehaviourPenaltyWeight:    -16,
@@ -69,7 +69,7 @@ func DefaultPeerScoreParams() *pubsub.PeerScoreParams {
 // because the defaults award no positive score, a positive threshold would be
 // unreachable and reject all peer exchange. At 0, peer records offered via PRUNE are
 // accepted from any non-negatively-scored peer and rejected from peers that scoring has
-// driven negative (Sybil colocation or misbehaviour) - which is the vector the mesh
+// driven negative (Sybil colocation or misbehavior) - which is the vector the mesh
 // needs closed. The negative thresholds leave generous headroom so honest peers behind
 // a shared IP or with a transient behaviour blip are not graylisted.
 func DefaultPeerScoreThresholds() *pubsub.PeerScoreThresholds {

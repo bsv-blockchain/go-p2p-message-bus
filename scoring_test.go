@@ -2,7 +2,6 @@ package p2p
 
 import (
 	"context"
-	"strings"
 	"testing"
 	"time"
 
@@ -229,7 +228,7 @@ func TestNewClientDisablePeerExchange(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, cl.Close()) })
 
-	require.True(t, strings.Contains(log.String(), "peer exchange disabled"))
+	require.Contains(t, log.String(), "peer exchange disabled")
 }
 
 // TestDefaultPeerScoreThresholds pins the security-critical property that
@@ -275,6 +274,6 @@ func TestAppSpecificScoreOverride(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, params.AppSpecificScore)
 
-	require.Equal(t, 5.0, params.AppSpecificScore(peer.ID("")))
+	require.InDelta(t, 5.0, params.AppSpecificScore(peer.ID("")), 0)
 	require.True(t, called)
 }
