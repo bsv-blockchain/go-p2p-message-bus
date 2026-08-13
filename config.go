@@ -199,7 +199,7 @@ type Config struct {
 	// DisablePeerExchange, in any deployment exposed to untrusted peers.
 	//
 	// The defaults are penalty-only: a well-behaved peer sits at score 0, and only
-	// misbehaviour or IP colocation drives a score negative. To award positive score
+	// misbehavior or IP colocation drives a score negative. To award positive score
 	// to specific peers, or to add per-topic scoring, set PeerScoreParams /
 	// AppSpecificScore. Default: false (no scoring, for backwards compatibility).
 	EnablePeerScoring bool
