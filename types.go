@@ -2,8 +2,11 @@ package p2p
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/libp2p/go-libp2p/core/peer"
 )
@@ -39,7 +42,7 @@ type P2PClient = Client
 // Message represents a received message from a peer.
 type Message struct {
 	Topic     string    // The topic this message was received on
-	From      string    // The sender's name
+	From      string    // The sender's name, as sanitized by the receiver (printable, at most 64 bytes)
 	FromID    string    // The sender's peer ID
 	Data      []byte    // The message payload
 	Timestamp time.Time // When the message was received
@@ -48,7 +51,7 @@ type Message struct {
 // PeerInfo contains information about a connected peer.
 type PeerInfo struct {
 	ID    string   // Peer ID
-	Name  string   // Peer name (if known)
+	Name  string   // Peer name (if known), as sanitized by the receiver (printable, at most 64 bytes)
 	Addrs []string // Peer addresses
 }
 
@@ -65,6 +68,59 @@ type cachedPeer struct {
 // before it is skipped. A single WARN is logged on transition to skipped state;
 // subsequent malformed messages from that peer are dropped silently.
 const malformedThreshold = 5
+
+// maxPeerNameLen bounds the peer name accepted from a gossip envelope. The
+// field is peer-controlled and otherwise limited only by the pubsub message
+// size, and it is embedded in log lines, so an unbounded name would turn every
+// mention of the peer into a log-amplification channel.
+const maxPeerNameLen = 64
+
+// requestWindow counts inbound peer-address requests from one peer within the
+// rate-limit window that started at start, rejected ones included.
+type requestWindow struct {
+	start time.Time
+	count int
+}
+
+// peerAddressLimiter enforces the per-peer budget of inbound peer-address
+// requests. It has its own lock so a request flood never contends with the
+// peerTracker lock on the pubsub receive path.
+type peerAddressLimiter struct {
+	mu      sync.Mutex
+	windows map[peer.ID]requestWindow
+}
+
+func newPeerAddressLimiter() *peerAddressLimiter {
+	return &peerAddressLimiter{windows: make(map[peer.ID]requestWindow)}
+}
+
+// allow reports whether peerID may open another peer-address request at now,
+// counting the request either way. firstRejection is true only for the first
+// request over budget in the current window, so the caller can log it once.
+// Expired windows are pruned on every call; the map is bounded by the set of
+// peers that made a request within the last window.
+func (l *peerAddressLimiter) allow(peerID peer.ID, now time.Time) (allowed, firstRejection bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	for id, w := range l.windows {
+		if now.Sub(w.start) >= peerAddressRequestWindow {
+			delete(l.windows, id)
+		}
+	}
+
+	w := l.windows[peerID]
+	if w.count == 0 {
+		w.start = now
+	}
+	w.count++
+	l.windows[peerID] = w
+
+	if w.count > peerAddressRequestsPerWindow {
+		return false, w.count == peerAddressRequestsPerWindow+1
+	}
+	return true, false
+}
 
 type peerTracker struct {
 	mu            sync.RWMutex
@@ -110,10 +166,39 @@ func (pt *peerTracker) shouldSkipMalformed(peerID peer.ID) bool {
 	return pt.skipMalformed[peerID]
 }
 
-func (pt *peerTracker) updateName(peerID peer.ID, name string) {
+// updateName stores the sanitized form of a peer-supplied name and returns it.
+func (pt *peerTracker) updateName(peerID peer.ID, name string) string {
+	name = sanitizePeerName(name)
 	pt.mu.Lock()
 	defer pt.mu.Unlock()
 	pt.names[peerID] = name
+	return name
+}
+
+// sanitizePeerName drops non-printable runes (so a name can never break a log
+// line) and truncates to maxPeerNameLen bytes on a rune boundary.
+func sanitizePeerName(name string) string {
+	// Bound the work before decoding: strings.Map expands each invalid byte to
+	// a 3-byte replacement rune, and the input is peer-controlled.
+	if len(name) > 4*maxPeerNameLen {
+		name = name[:4*maxPeerNameLen]
+	}
+
+	name = strings.Map(func(r rune) rune {
+		if unicode.IsPrint(r) {
+			return r
+		}
+		return -1
+	}, name)
+
+	if len(name) <= maxPeerNameLen {
+		return name
+	}
+	cut := maxPeerNameLen
+	for cut > 0 && !utf8.RuneStart(name[cut]) {
+		cut--
+	}
+	return name[:cut]
 }
 
 func (pt *peerTracker) getName(peerID peer.ID) string {

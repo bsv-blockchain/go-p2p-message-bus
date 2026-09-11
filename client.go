@@ -39,8 +39,51 @@ import (
 )
 
 const (
-	// peerAddressRequestProtocol is the protocol ID for requesting peer addresses
+	// peerAddressRequestProtocol is the original peer-address request protocol.
+	// The requester writes an encoded peer ID in a single call and does not
+	// half-close, so the responder has to treat one read as the whole request.
 	peerAddressRequestProtocol = "/p2p-msg-bus/peer-addr-request/1.0.0"
+
+	// peerAddressRequestProtocolV2 differs from 1.0.0 only in framing: the
+	// requester half-closes after writing the peer ID, so the responder reads
+	// to EOF and reassembles a fragmented request correctly. Requesters offer
+	// both and fall back to 1.0.0 against older peers.
+	peerAddressRequestProtocolV2 = "/p2p-msg-bus/peer-addr-request/1.1.0"
+
+	// peerAddressStreamTimeout bounds how long either side of a peer-address
+	// exchange waits on the stream. Without it a peer that opens a stream and
+	// never writes pins a handler goroutine and a stream for the life of the
+	// connection, and a requester wedges on a peer that never answers.
+	peerAddressStreamTimeout = 10 * time.Second
+
+	// maxPeerIDRequestBytes bounds the encoded peer ID a requester may send.
+	// Encoded peer IDs are well under 128 bytes.
+	maxPeerIDRequestBytes = 128
+
+	// minPeerIDBytes is the shortest decoded peer ID libp2p produces: a sha256
+	// multihash (34 bytes); identity multihashes of supported keys are longer.
+	// Anything shorter is a prefix that happened to decode, not a real peer.
+	minPeerIDBytes = 34
+
+	// maxSharedPeerAddresses caps the addresses exchanged for one peer in either
+	// direction, so a responder cannot stuff a requester's peerstore and a
+	// responder never emits a reply its peers would reject as oversized.
+	maxSharedPeerAddresses = 32
+
+	// maxPeerAddressResponseBytes bounds the JSON address list a responder may
+	// send; maxSharedPeerAddresses multiaddrs fit comfortably.
+	maxPeerAddressResponseBytes = 8 * 1024
+
+	// peerAddressRetryInterval is how long a failed address lookup for a topic
+	// peer is remembered before it is attempted again.
+	peerAddressRetryInterval = 5 * time.Minute
+
+	// peerAddressRequestWindow and peerAddressRequestsPerWindow bound how many
+	// inbound address requests a single peer may open; excess streams are reset.
+	// A legitimate peer asks each neighbour once per unknown topic peer per 15s
+	// scan, so a cold-starting node on a large topic can burst several hundred.
+	peerAddressRequestWindow     = time.Minute
+	peerAddressRequestsPerWindow = 512
 )
 
 var (
@@ -48,6 +91,10 @@ var (
 	ErrNameRequired = errors.New("config.Name is required")
 	// ErrPrivateKeyRequired is returned when Config.PrivateKey is not provided.
 	ErrPrivateKeyRequired = errors.New("config.PrivateKey is required")
+
+	errPeerIDRequestTooLarge       = errors.New("peer address request exceeds size limit")
+	errPeerIDRequestInvalid        = errors.New("peer address request is not a valid peer ID")
+	errPeerAddressResponseTooLarge = errors.New("peer address response exceeds size limit")
 )
 
 // Compile-time check to ensure client implements Client interface
@@ -70,6 +117,16 @@ type client struct {
 	logger           logger
 	routingDiscovery *drouting.RoutingDiscovery
 	discoverNow      chan struct{}
+
+	// peerAddrStreamTimeout is the per-stream deadline for the peer-address
+	// exchange. Defaults to peerAddressStreamTimeout; tests shorten it.
+	peerAddrStreamTimeout time.Duration
+	// peerAddrLimiter enforces the per-peer inbound peer-address request budget.
+	peerAddrLimiter *peerAddressLimiter
+	// addrLookupsInFlight holds the targets currently being looked up so the
+	// retry loop never runs two lookups for one target concurrently.
+	addrLookupsMu       sync.Mutex
+	addrLookupsInFlight map[peer.ID]struct{}
 }
 
 // NewClient creates and initializes a new P2P client.
@@ -83,6 +140,15 @@ func NewClient(config Config) (Client, error) {
 
 	// Use provided logger or default
 	clientLogger := getLogger(config.Logger)
+
+	if seen := sanitizePeerName(config.Name); seen != config.Name {
+		clientLogger.Warnf("Config.Name %q will be seen by peers as %q (names are limited to %d printable bytes)", config.Name, seen, maxPeerNameLen)
+	}
+
+	streamTimeout := peerAddressStreamTimeout
+	if config.peerAddressStreamTimeout > 0 {
+		streamTimeout = config.peerAddressStreamTimeout
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Validate private key (required)
@@ -180,11 +246,16 @@ func NewClient(config Config) (Client, error) {
 		logger:           clientLogger,
 		routingDiscovery: routingDiscovery,
 		discoverNow:      make(chan struct{}, 1),
+
+		peerAddrStreamTimeout: streamTimeout,
+		peerAddrLimiter:       newPeerAddressLimiter(),
+		addrLookupsInFlight:   make(map[peer.ID]struct{}),
 	}
 
 	// Set up peer address request/response protocol handler
 	// This allows other peers to request addresses from us (useful for DHT-off clients)
 	h.SetStreamHandler(protocol.ID(peerAddressRequestProtocol), c.handlePeerAddressRequest)
+	h.SetStreamHandler(protocol.ID(peerAddressRequestProtocolV2), c.handlePeerAddressRequest)
 	clientLogger.Infof("Peer address request protocol handler installed")
 
 	// Always maintain bootstrap peer connections - ensures reconnection after
@@ -965,32 +1036,61 @@ func (c *client) attemptDirectConnectionsToTopicPeers(ctx context.Context) {
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 
-	// Track peers we've already requested to avoid spam
-	requested := make(map[peer.ID]bool)
+	// Track when each peer was last asked for so a lookup that failed (every
+	// connected peer timed out or knew nothing) is retried after
+	// peerAddressRetryInterval instead of being written off for good.
+	requested := make(map[peer.ID]time.Time)
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			allTopicPeers := c.peerTracker.getAllTopicPeers()
-			c.logger.Debugf("Scanning %d topic peers for address discovery", len(allTopicPeers))
+			c.scanTopicPeersForAddresses(requested, time.Now())
+		}
+	}
+}
 
-			for _, targetPeer := range allTopicPeers {
-				// Skip if already connected directly
-				if c.host.Network().Connectedness(targetPeer) == network.Connected {
-					continue
-				}
+// scanTopicPeersForAddresses starts a lookup for every topic peer that is not
+// directly connected and is due for one, recording the attempt in requested.
+func (c *client) scanTopicPeersForAddresses(requested map[peer.ID]time.Time, now time.Time) {
+	allTopicPeers := c.peerTracker.getAllTopicPeers()
+	c.logger.Debugf("Scanning %d topic peers for address discovery", len(allTopicPeers))
 
-				// Skip if already requested
-				if requested[targetPeer] {
-					continue
-				}
+	topicSet := make(map[peer.ID]struct{}, len(allTopicPeers))
+	for _, targetPeer := range allTopicPeers {
+		topicSet[targetPeer] = struct{}{}
 
-				// Request addresses from connected peers
-				go c.requestPeerAddresses(targetPeer)
-				requested[targetPeer] = true
-			}
+		// Skip if already connected directly
+		if c.host.Network().Connectedness(targetPeer) == network.Connected {
+			continue
+		}
+
+		if !shouldRequestPeerAddresses(requested, targetPeer, now) {
+			continue
+		}
+
+		// Request addresses from connected peers
+		go c.requestPeerAddresses(targetPeer)
+		requested[targetPeer] = now
+	}
+
+	pruneRequested(requested, topicSet)
+}
+
+// shouldRequestPeerAddresses reports whether targetPeer has never been asked
+// for, or was last asked for at least peerAddressRetryInterval ago.
+func shouldRequestPeerAddresses(requested map[peer.ID]time.Time, targetPeer peer.ID, now time.Time) bool {
+	last, ok := requested[targetPeer]
+	return !ok || now.Sub(last) >= peerAddressRetryInterval
+}
+
+// pruneRequested drops entries for peers no longer on any subscribed topic so
+// the map is bounded by the current topic peer set.
+func pruneRequested(requested map[peer.ID]time.Time, topicPeers map[peer.ID]struct{}) {
+	for id := range requested {
+		if _, ok := topicPeers[id]; !ok {
+			delete(requested, id)
 		}
 	}
 }
@@ -1098,14 +1198,16 @@ func (c *client) receiveMessages(sub *pubsub.Subscription, topic *pubsub.Topic, 
 			continue
 		}
 
-		c.peerTracker.updateName(author, m.Name)
+		// The name is peer-controlled and otherwise bounded only by the pubsub
+		// message size; store and surface the sanitized form only.
+		name := c.peerTracker.updateName(author, m.Name)
 		c.peerTracker.recordMessageFrom(author)
 
 		// Send to channel
 		select {
 		case msgChan <- Message{
 			Topic:     topic.String(),
-			From:      m.Name,
+			From:      name,
 			FromID:    author.String(),
 			Data:      m.Data,
 			Timestamp: time.Now(),
@@ -1165,8 +1267,15 @@ func (c *client) savePeerCache() {
 	}
 }
 
-// requestPeerAddresses asks connected peers if they know addresses for a target peer
+// requestPeerAddresses asks connected peers if they know addresses for a target
+// peer. At most one lookup per target runs at a time; a call that finds one in
+// flight returns immediately.
 func (c *client) requestPeerAddresses(targetPeerID peer.ID) {
+	if !c.beginAddrLookup(targetPeerID) {
+		return
+	}
+	defer c.endAddrLookup(targetPeerID)
+
 	peerName := c.peerTracker.getName(targetPeerID)
 
 	// Get all directly connected peers
@@ -1175,13 +1284,19 @@ func (c *client) requestPeerAddresses(targetPeerID peer.ID) {
 	c.logger.Debugf("Requesting addresses for peer %s from %d connected peers", peerName, len(connectedPeers))
 
 	for _, connectedPeer := range connectedPeers {
+		if c.ctx.Err() != nil {
+			return
+		}
+
 		// Skip self
 		if connectedPeer == c.host.ID() {
 			continue
 		}
 
-		// Open stream to request peer addresses
-		stream, err := c.host.NewStream(c.ctx, connectedPeer, protocol.ID(peerAddressRequestProtocol))
+		// Open stream to request peer addresses, preferring the half-close
+		// framing and falling back to 1.0.0 for older peers.
+		stream, err := c.host.NewStream(c.ctx, connectedPeer,
+			protocol.ID(peerAddressRequestProtocolV2), protocol.ID(peerAddressRequestProtocol))
 		if err != nil {
 			// Only log if it's not a "protocol not supported" error
 			if !strings.Contains(err.Error(), "protocols not supported") {
@@ -1190,32 +1305,9 @@ func (c *client) requestPeerAddresses(targetPeerID peer.ID) {
 			continue
 		}
 
-		// Send the peer ID we're looking for
-		_, err = stream.Write([]byte(targetPeerID.String()))
+		addrs, err := c.exchangePeerAddressRequest(stream, targetPeerID)
 		if err != nil {
-			_ = stream.Close()
-			c.logger.Debugf("Failed to write to stream: %v", err)
-			continue
-		}
-
-		c.logger.Debugf("Sent address request for %s to %s", peerName, connectedPeer.String()[:16])
-
-		// Read response
-		buf := make([]byte, 4096)
-		n, err := stream.Read(buf)
-		_ = stream.Close()
-
-		if err != nil && !errors.Is(err, io.EOF) {
-			c.logger.Debugf("Failed to read response from %s: %v", connectedPeer.String()[:16], err)
-			continue
-		}
-
-		c.logger.Debugf("Received %d bytes response from %s", n, connectedPeer.String()[:16])
-
-		// Parse response (JSON array of multiaddrs)
-		var addrs []string
-		if err := json.Unmarshal(buf[:n], &addrs); err != nil {
-			c.logger.Debugf("Failed to parse response: %v (data: %s)", err, string(buf[:n]))
+			c.logger.Debugf("Peer address request to %s for %s failed: %v", connectedPeer.String()[:16], peerName, err)
 			continue
 		}
 
@@ -1225,7 +1317,7 @@ func (c *client) requestPeerAddresses(targetPeerID peer.ID) {
 			c.logger.Infof("Peer %s shared %d addresses for %s", connectedPeer.String()[:16], len(addrs), peerName)
 
 			// Add addresses to peerstore
-			maddrs := parseMultiaddrs(addrs)
+			maddrs := parseMultiaddrs(addrs[:min(len(addrs), maxSharedPeerAddresses)])
 			c.host.Peerstore().AddAddrs(targetPeerID, maddrs, peerstore.PermanentAddrTTL)
 
 			// Try to connect
@@ -1237,76 +1329,187 @@ func (c *client) requestPeerAddresses(targetPeerID peer.ID) {
 	c.logger.Debugf("No connected peers had addresses for %s", peerName)
 }
 
-// handlePeerAddressRequest handles incoming requests for peer addresses
+// beginAddrLookup marks targetPeerID as being looked up and reports whether
+// the caller won that right.
+func (c *client) beginAddrLookup(targetPeerID peer.ID) bool {
+	c.addrLookupsMu.Lock()
+	defer c.addrLookupsMu.Unlock()
+	if _, inFlight := c.addrLookupsInFlight[targetPeerID]; inFlight {
+		return false
+	}
+	c.addrLookupsInFlight[targetPeerID] = struct{}{}
+	return true
+}
+
+func (c *client) endAddrLookup(targetPeerID peer.ID) {
+	c.addrLookupsMu.Lock()
+	defer c.addrLookupsMu.Unlock()
+	delete(c.addrLookupsInFlight, targetPeerID)
+}
+
+// exchangePeerAddressRequest sends targetPeerID over an open peer-address
+// stream and returns the responder's address list. The whole exchange runs
+// under one deadline so a responder that never answers cannot pin the caller,
+// and the response is size-bounded. The stream is closed on success and reset
+// on any failure so the responder learns the exchange was abandoned.
+func (c *client) exchangePeerAddressRequest(stream network.Stream, targetPeerID peer.ID) (addrs []string, err error) {
+	defer func() {
+		if err != nil {
+			_ = stream.Reset()
+			return
+		}
+		_ = stream.Close()
+	}()
+
+	if err := stream.SetDeadline(time.Now().Add(c.peerAddrStreamTimeout)); err != nil {
+		return nil, fmt.Errorf("set deadline: %w", err)
+	}
+
+	if _, err := stream.Write([]byte(targetPeerID.String())); err != nil {
+		return nil, fmt.Errorf("write request: %w", err)
+	}
+
+	// Half-close so a 1.1.0 responder sees EOF. A 1.0.0 responder has already
+	// received the data in its single read, so this is harmless there.
+	if err := stream.CloseWrite(); err != nil {
+		return nil, fmt.Errorf("close write: %w", err)
+	}
+
+	// The responder closes its side once the JSON is written, so read to EOF.
+	raw, err := io.ReadAll(io.LimitReader(stream, maxPeerAddressResponseBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read response: %w", err)
+	}
+	if len(raw) > maxPeerAddressResponseBytes {
+		return nil, errPeerAddressResponseTooLarge
+	}
+
+	if err := json.Unmarshal(raw, &addrs); err != nil {
+		return nil, fmt.Errorf("parse response: %w", err)
+	}
+
+	return addrs, nil
+}
+
+// handlePeerAddressRequest handles incoming requests for peer addresses.
+//
+// Everything the requester sends is untrusted: the read is bounded in both
+// size and time, requests are rate limited per peer, and request bytes are
+// never echoed into the log. Per-request logging is at debug level; the first
+// rejection of a peer per rate-limit window is logged once at warn level.
 func (c *client) handlePeerAddressRequest(stream network.Stream) {
-	defer func() { _ = stream.Close() }()
+	remote := stream.Conn().RemotePeer()
 
-	c.logger.Infof("Received peer address request from %s", stream.Conn().RemotePeer().String()[:16])
-
-	// Read the requested peer ID
-	buf := make([]byte, 256)
-	n, err := stream.Read(buf)
-	if err != nil {
-		c.logger.Errorf("Failed to read peer ID from request: %v", err)
+	if allowed, firstRejection := c.peerAddrLimiter.allow(remote, time.Now()); !allowed {
+		if firstRejection {
+			c.logger.Warnf("Peer %s exceeded %d peer address requests per %s; resetting further requests this window", remote.String()[:16], peerAddressRequestsPerWindow, peerAddressRequestWindow)
+		}
+		_ = stream.Reset()
 		return
 	}
 
-	requestedPeerIDStr := string(buf[:n])
-	c.logger.Debugf("Request for peer ID: %s", requestedPeerIDStr)
+	// Reset on failure so the requester sees an error rather than a clean EOF.
+	ok := false
+	defer func() {
+		if ok {
+			_ = stream.Close()
+			return
+		}
+		_ = stream.Reset()
+	}()
 
-	requestedPeerID, err := peer.Decode(requestedPeerIDStr)
-	if err != nil {
-		c.logger.Errorf("Failed to decode peer ID: %v", err)
+	if err := stream.SetDeadline(time.Now().Add(c.peerAddrStreamTimeout)); err != nil {
+		c.logger.Debugf("Failed to set deadline on peer address request from %s: %v", remote.String()[:16], err)
 		return
 	}
 
-	requesterName := c.peerTracker.getName(stream.Conn().RemotePeer())
+	c.logger.Debugf("Received peer address request from %s", remote.String()[:16])
+
+	requestedPeerID, err := readPeerIDRequest(stream, stream.Protocol())
+	if err != nil {
+		c.logger.Debugf("Rejected peer address request from %s: %v", remote.String()[:16], err)
+		return
+	}
+
+	requesterName := c.peerTracker.getName(remote)
 	requestedName := c.peerTracker.getName(requestedPeerID)
 
-	// Check if we have addresses for this peer
-	addrs := c.host.Peerstore().Addrs(requestedPeerID)
+	// Only share direct addresses, never relay circuits.
+	addrStrs := c.directPeerAddresses(requestedPeerID)
 
-	c.logger.Infof("Peer address request from %s for %s: found %d addresses in peerstore",
-		requesterName, requestedName, len(addrs))
+	c.logger.Debugf("Peer address request from %s for %s: sharing %d direct addresses", requesterName, requestedName, len(addrStrs))
 
-	if len(addrs) == 0 {
-		// No addresses - send empty response
-		_, _ = stream.Write([]byte("[]"))
+	response, _ := json.Marshal(addrStrs) // a []string cannot fail to marshal
+	if _, err := stream.Write(response); err != nil {
 		return
 	}
+	ok = true
+}
 
-	// Filter out relay circuit addresses - only share direct addresses
-	directAddrs := make([]multiaddr.Multiaddr, 0)
+// readPeerIDRequest reads and decodes the encoded peer ID of a request.
+//
+// A 1.1.0 requester half-closes after writing, so the ID is read to EOF and
+// fragmentation is handled. A 1.0.0 requester does not half-close and the
+// request carries no length prefix, so the legacy framing is one read: the ID
+// is written in a single call and yamux delivers that frame atomically, so in
+// practice the read returns the whole ID. Should a legacy request ever arrive
+// fragmented, the bytes are never accumulated speculatively, because a prefix
+// of a base58 peer ID can itself decode as a different, valid
+// identity-multihash peer ID; every such prefix is shorter than any real peer
+// ID and is rejected by the minPeerIDBytes check, so the request fails rather
+// than being answered for the wrong peer.
+func readPeerIDRequest(r io.Reader, proto protocol.ID) (peer.ID, error) {
+	var (
+		raw []byte
+		err error
+	)
+	if proto == peerAddressRequestProtocolV2 {
+		raw, err = io.ReadAll(io.LimitReader(r, maxPeerIDRequestBytes+1))
+	} else {
+		raw, err = readLegacyPeerIDRequest(r)
+	}
+	if err != nil {
+		return "", err
+	}
+	if len(raw) > maxPeerIDRequestBytes {
+		return "", errPeerIDRequestTooLarge
+	}
+
+	id, err := peer.Decode(string(raw))
+	if err != nil || len(id) < minPeerIDBytes {
+		// Never echo request bytes: they are attacker-controlled.
+		return "", fmt.Errorf("%w (%d bytes)", errPeerIDRequestInvalid, len(raw))
+	}
+	return id, nil
+}
+
+// readLegacyPeerIDRequest performs the single bounded read of the 1.0.0 framing.
+func readLegacyPeerIDRequest(r io.Reader) ([]byte, error) {
+	buf := make([]byte, maxPeerIDRequestBytes+1)
+	n, err := r.Read(buf)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, err
+	}
+	return buf[:n], nil
+}
+
+// directPeerAddresses returns up to maxSharedPeerAddresses peerstore addresses
+// for id, excluding relay circuit addresses. The result is never nil so it
+// marshals as "[]".
+func (c *client) directPeerAddresses(id peer.ID) []string {
+	addrs := c.host.Peerstore().Addrs(id)
+	direct := make([]string, 0, min(len(addrs), maxSharedPeerAddresses))
 	for _, addr := range addrs {
-		// Skip relay circuit addresses
-		if strings.Contains(addr.String(), "/p2p-circuit") {
+		if len(direct) == maxSharedPeerAddresses {
+			break
+		}
+		s := addr.String()
+		if strings.Contains(s, "/p2p-circuit") {
 			continue
 		}
-		directAddrs = append(directAddrs, addr)
+		direct = append(direct, s)
 	}
-
-	if len(directAddrs) == 0 {
-		c.logger.Debugf("No direct addresses for %s (only relay circuits)", requestedName)
-		_, _ = stream.Write([]byte("[]"))
-		return
-	}
-
-	// Convert to string array
-	addrStrs := make([]string, len(directAddrs))
-	for i, addr := range directAddrs {
-		addrStrs[i] = addr.String()
-		c.logger.Debugf("  Direct address %d: %s", i+1, addr.String())
-	}
-
-	// Send as JSON
-	response, err := json.Marshal(addrStrs)
-	if err != nil {
-		_, _ = stream.Write([]byte("[]"))
-		return
-	}
-
-	c.logger.Infof("Sharing %d direct addresses for peer %s with %s", len(directAddrs), requestedName, requesterName)
-	_, _ = stream.Write(response)
+	return direct
 }
 
 // Helper functions

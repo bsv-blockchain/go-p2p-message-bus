@@ -132,6 +132,11 @@ type Config struct {
 	// If not provided or empty, defaults to "server" mode.
 	DHTMode string
 
+	// peerAddressStreamTimeout overrides the per-stream deadline of the
+	// peer-address exchange. Zero means the default. Tests shorten it; it is
+	// unexported because production peers must agree on the default.
+	peerAddressStreamTimeout time.Duration
+
 	// DHTCleanupInterval is the interval at which the DHT's ProviderManager performs
 	// garbage collection of expired provider records. The cleanup involves querying all
 	// provider records and removing expired entries.
