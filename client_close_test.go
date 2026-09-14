@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -136,7 +137,7 @@ func TestSubscribeConcurrentWithClose(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		<-start
-		require.NoError(t, cl.Close())
+		assert.NoError(t, cl.Close())
 	}()
 
 	close(start)
