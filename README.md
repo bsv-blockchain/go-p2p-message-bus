@@ -197,7 +197,7 @@ go get -u github.com/bsv-blockchain/go-p2p-message-bus
 
 ```go
 type Config struct {
-    Name           string         // Required: identifier for this peer
+    Name           string         // Required: identifier for this peer (receivers keep at most 64 printable bytes)
     BootstrapPeers []string       // Optional: initial peers to connect to
     Logger         Logger         // Optional: custom logger (uses DefaultLogger if not provided)
     PrivateKey     crypto.PrivKey // Required: private key for persistent peer ID
@@ -376,7 +376,7 @@ Shuts down the client and releases all resources.
 ```go
 type Message struct {
     Topic     string    // Topic this message was received on
-    From      string    // Sender's name
+    From      string    // Sender's name, as sanitized by the receiver (printable, at most 64 bytes)
     FromID    string    // Sender's peer ID
     Data      []byte    // Message payload
     Timestamp time.Time // When the message was received
@@ -388,7 +388,7 @@ type Message struct {
 ```go
 type PeerInfo struct {
     ID    string   // Peer ID
-    Name  string   // Peer name (if known)
+    Name  string   // Peer name (if known), as sanitized by the receiver (printable, at most 64 bytes)
     Addrs []string // Peer addresses
 }
 ```
