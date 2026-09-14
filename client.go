@@ -55,14 +55,21 @@ var _ Client = (*client)(nil)
 
 // client represents a P2P messaging client implementation.
 type client struct {
-	config           Config
-	host             host.Host
-	dht              *dht.IpfsDHT
-	pubsub           *pubsub.PubSub
-	topics           map[string]*pubsub.Topic
-	subs             map[string]*pubsub.Subscription
-	msgChans         map[string]chan Message
-	mu               sync.RWMutex
+	config Config
+	host   host.Host
+	dht    *dht.IpfsDHT
+	pubsub *pubsub.PubSub
+	topics map[string]*pubsub.Topic
+	subs   map[string]*pubsub.Subscription
+	mu     sync.RWMutex
+	// readers tracks every Subscribe goroutine. Each one owns its message
+	// channel and closes it on exit; Close cancels the context, then waits
+	// here before tearing down the host, so no reader can ever send on a
+	// channel that has already been closed under it.
+	readers sync.WaitGroup
+	// closed is set under mu by Close before it waits on readers, so a
+	// concurrent Subscribe cannot add a reader to a draining WaitGroup.
+	closed           bool
 	peerTracker      *peerTracker
 	ctx              context.Context //nolint:containedctx // Client manages its own lifecycle
 	cancel           context.CancelFunc
@@ -172,7 +179,6 @@ func NewClient(config Config) (Client, error) {
 		pubsub:           ps,
 		topics:           make(map[string]*pubsub.Topic),
 		subs:             make(map[string]*pubsub.Subscription),
-		msgChans:         make(map[string]chan Message),
 		peerTracker:      newPeerTracker(),
 		ctx:              ctx,
 		cancel:           cancel,
@@ -531,17 +537,30 @@ func loadAndConnectCachedPeers(ctx context.Context, h host.Host, config Config, 
 }
 
 // Subscribe subscribes to a topic and returns a channel that will receive messages.
-// The returned channel will be closed when the client is closed.
+// The returned channel is closed when the client is closed (or, if the client
+// is already closed, immediately). The channel is owned by the reader
+// goroutine started here: it is the only code that closes it, and it does so
+// only after it has stopped sending, so a consumer ranging over the channel
+// terminates cleanly and a send-on-closed-channel panic is impossible.
 func (c *client) Subscribe(topic string) <-chan Message {
 	msgChan := make(chan Message, 100)
 
 	c.logger.Debugf("Subscribing to topic: %s", topic)
 
 	c.mu.Lock()
-	c.msgChans[topic] = msgChan
+	if c.closed {
+		c.mu.Unlock()
+		c.logger.Warnf("Subscribe to topic %s after Close: returning closed channel", topic)
+		close(msgChan)
+		return msgChan
+	}
+	c.readers.Add(1)
 	c.mu.Unlock()
 
 	go func() {
+		defer c.readers.Done()
+		defer close(msgChan)
+
 		// Join or get existing topic
 		c.mu.Lock()
 		t, ok := c.topics[topic]
@@ -552,7 +571,6 @@ func (c *client) Subscribe(topic string) <-chan Message {
 			t, err = c.pubsub.Join(topic)
 			if err != nil {
 				c.logger.Errorf("Failed to join topic %s: %v", topic, err)
-				close(msgChan)
 				return
 			}
 
@@ -565,7 +583,6 @@ func (c *client) Subscribe(topic string) <-chan Message {
 		sub, err := t.Subscribe()
 		if err != nil {
 			c.logger.Errorf("Failed to subscribe to topic %s: %v", topic, err)
-			close(msgChan)
 			return
 		}
 
@@ -680,23 +697,58 @@ func (c *client) GetID() string {
 	return c.host.ID().String()
 }
 
+// closeReadersWait bounds how long Close waits for subscription readers to
+// exit before tearing down the host regardless. It sits inside the overall
+// closeTimeout so the host teardown still gets a share of the budget.
+const (
+	closeReadersWait = 1 * time.Second
+	closeTimeout     = 2 * time.Second
+)
+
 // Close shuts down the client and releases all resources.
+//
+// Shutdown order matters: the producers (subscription readers) are stopped
+// first and the consumer-facing channels are closed by those readers as they
+// exit. Cancelling the client context unblocks every reader parked in
+// Subscription.Next (which selects on that context) or in a channel send;
+// Close then waits for them before closing topics and the host, so a reader
+// that just pulled a buffered message can never race a close of the channel
+// it is about to send on. Safe to call more than once.
 func (c *client) Close() error {
+	c.mu.Lock()
+	c.closed = true
+	c.mu.Unlock()
+
 	c.cancel()
 
 	done := make(chan struct{})
 	go func() {
 		c.mu.Lock()
-		// Close all message channels
-		for _, ch := range c.msgChans {
-			close(ch)
-		}
-
-		// Cancel all subscriptions
+		// Best-effort subscription cleanup. Readers are already unblocked by
+		// the context cancellation above (pubsub subscriptions share the
+		// client context, so Cancel is a no-op at this point); this only
+		// matters if pubsub ever stops deriving from it.
 		for _, sub := range c.subs {
 			sub.Cancel()
 		}
+		c.mu.Unlock()
 
+		// Wait for every reader to exit; each closes its own channel on the
+		// way out. Bounded so a reader stuck in a blocking user logger cannot
+		// hold the listening sockets open past the shutdown budget: after the
+		// wait budget the host is torn down anyway.
+		readersDone := make(chan struct{})
+		go func() {
+			c.readers.Wait()
+			close(readersDone)
+		}()
+		select {
+		case <-readersDone:
+		case <-time.After(closeReadersWait):
+			c.logger.Warnf("Subscription readers did not exit within %s, tearing down host anyway", closeReadersWait)
+		}
+
+		c.mu.Lock()
 		// Close all topics
 		for _, topic := range c.topics {
 			_ = topic.Close()
@@ -717,7 +769,7 @@ func (c *client) Close() error {
 	select {
 	case <-done:
 		return nil
-	case <-time.After(2 * time.Second):
+	case <-time.After(closeTimeout):
 		c.logger.Warnf("Clean shutdown timed out, forcing exit")
 		return nil
 	}
@@ -1071,7 +1123,12 @@ func (c *client) receiveMessages(sub *pubsub.Subscription, topic *pubsub.Topic, 
 	for {
 		msg, err := sub.Next(c.ctx)
 		if err != nil {
-			if c.ctx.Err() != nil {
+			// Both ways Next can fail are terminal: the client context is
+			// cancelled, or the subscription itself was cancelled, in which
+			// case Next keeps returning ErrSubscriptionCancelled immediately.
+			// Retrying the latter would spin at 100% CPU and, since Close
+			// waits for readers, wedge shutdown.
+			if c.ctx.Err() != nil || errors.Is(err, pubsub.ErrSubscriptionCancelled) {
 				return
 			}
 			c.logger.Errorf("Error reading message: %v", err)

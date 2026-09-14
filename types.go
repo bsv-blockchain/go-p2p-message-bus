@@ -11,7 +11,8 @@ import (
 // Client defines the interface for a P2P messaging client.
 type Client interface {
 	// Subscribe subscribes to a topic and returns a channel that will receive messages.
-	// The returned channel will be closed when the client is closed.
+	// The returned channel is closed when the client is closed; a Subscribe issued
+	// after Close returns an already-closed channel.
 	Subscribe(topic string) <-chan Message
 
 	// Publish publishes a message to the specified topic.

@@ -143,6 +143,11 @@ func TestClientCloseTwice(t *testing.T) {
 	cl, err := NewClient(config)
 	require.NoError(t, err)
 
+	// An active subscription is what made the second Close panic before
+	// readers owned their channels (Close used to close them itself).
+	msgChan := cl.Subscribe("close-twice-topic")
+	time.Sleep(100 * time.Millisecond)
+
 	// First close
 	err = cl.Close()
 	require.NoError(t, err)
@@ -151,6 +156,9 @@ func TestClientCloseTwice(t *testing.T) {
 	err = cl.Close()
 	// May return error or nil, both are acceptable
 	_ = err
+
+	_, ok := <-msgChan
+	require.False(t, ok, "subscription channel must be closed after Close")
 }
 
 func TestGetPeersWithNoConnections(t *testing.T) {
