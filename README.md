@@ -323,7 +323,7 @@ Creates and starts a new P2P client. The client automatically:
 func (c *Client) Subscribe(topic string) <-chan Message
 ```
 
-Subscribes to a topic and returns a channel that receives messages. The channel is closed when the client is closed.
+Subscribes to a topic and returns a channel that receives messages. The channel is closed when the client is closed (a `Subscribe` issued after `Close` returns an already-closed channel).
 
 **Publish**
 
