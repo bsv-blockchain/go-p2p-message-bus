@@ -141,14 +141,7 @@ func NewClient(config Config) (Client, error) {
 	// Use provided logger or default
 	clientLogger := getLogger(config.Logger)
 
-	if seen := sanitizePeerName(config.Name); seen != config.Name {
-		clientLogger.Warnf("Config.Name %q will be seen by peers as %q (names are limited to %d printable bytes)", config.Name, seen, maxPeerNameLen)
-	}
-
-	streamTimeout := peerAddressStreamTimeout
-	if config.peerAddressStreamTimeout > 0 {
-		streamTimeout = config.peerAddressStreamTimeout
-	}
+	streamTimeout := peerAddressExchangeSettings(config, clientLogger)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Validate private key (required)
@@ -305,6 +298,18 @@ func getBootstrapAndRelayPeers(config Config, clientLogger logger) ([]peer.AddrI
 }
 
 // Helper functions for NewClient
+
+// peerAddressExchangeSettings warns when the configured name would be altered
+// by receivers and returns the peer-address stream deadline to use.
+func peerAddressExchangeSettings(config Config, log logger) time.Duration {
+	if seen := sanitizePeerName(config.Name); seen != config.Name {
+		log.Warnf("Config.Name %q will be seen by peers as %q (names are limited to %d printable bytes)", config.Name, seen, maxPeerNameLen)
+	}
+	if config.peerAddressStreamTimeout > 0 {
+		return config.peerAddressStreamTimeout
+	}
+	return peerAddressStreamTimeout
+}
 
 func getLogger(configLogger logger) logger {
 	if configLogger == nil {
@@ -1352,15 +1357,17 @@ func (c *client) endAddrLookup(targetPeerID peer.ID) {
 // under one deadline so a responder that never answers cannot pin the caller,
 // and the response is size-bounded. The stream is closed on success and reset
 // on any failure so the responder learns the exchange was abandoned.
-func (c *client) exchangePeerAddressRequest(stream network.Stream, targetPeerID peer.ID) (addrs []string, err error) {
-	defer func() {
-		if err != nil {
-			_ = stream.Reset()
-			return
-		}
-		_ = stream.Close()
-	}()
+func (c *client) exchangePeerAddressRequest(stream network.Stream, targetPeerID peer.ID) ([]string, error) {
+	addrs, err := c.doPeerAddressExchange(stream, targetPeerID)
+	if err != nil {
+		_ = stream.Reset()
+		return nil, err
+	}
+	_ = stream.Close()
+	return addrs, nil
+}
 
+func (c *client) doPeerAddressExchange(stream network.Stream, targetPeerID peer.ID) ([]string, error) {
 	if err := stream.SetDeadline(time.Now().Add(c.peerAddrStreamTimeout)); err != nil {
 		return nil, fmt.Errorf("set deadline: %w", err)
 	}
@@ -1384,6 +1391,7 @@ func (c *client) exchangePeerAddressRequest(stream network.Stream, targetPeerID 
 		return nil, errPeerAddressResponseTooLarge
 	}
 
+	var addrs []string
 	if err := json.Unmarshal(raw, &addrs); err != nil {
 		return nil, fmt.Errorf("parse response: %w", err)
 	}
@@ -1409,41 +1417,41 @@ func (c *client) handlePeerAddressRequest(stream network.Stream) {
 	}
 
 	// Reset on failure so the requester sees an error rather than a clean EOF.
-	ok := false
-	defer func() {
-		if ok {
-			_ = stream.Close()
-			return
-		}
+	if err := c.servePeerAddressRequest(stream, remote); err != nil {
+		c.logger.Debugf("Rejected peer address request from %s: %v", remote.String()[:16], err)
 		_ = stream.Reset()
-	}()
-
-	if err := stream.SetDeadline(time.Now().Add(c.peerAddrStreamTimeout)); err != nil {
-		c.logger.Debugf("Failed to set deadline on peer address request from %s: %v", remote.String()[:16], err)
 		return
+	}
+	_ = stream.Close()
+}
+
+// servePeerAddressRequest reads one request from stream and writes the reply.
+func (c *client) servePeerAddressRequest(stream network.Stream, remote peer.ID) error {
+	if err := stream.SetDeadline(time.Now().Add(c.peerAddrStreamTimeout)); err != nil {
+		return fmt.Errorf("set deadline: %w", err)
 	}
 
 	c.logger.Debugf("Received peer address request from %s", remote.String()[:16])
 
 	requestedPeerID, err := readPeerIDRequest(stream, stream.Protocol())
 	if err != nil {
-		c.logger.Debugf("Rejected peer address request from %s: %v", remote.String()[:16], err)
-		return
+		return err
 	}
-
-	requesterName := c.peerTracker.getName(remote)
-	requestedName := c.peerTracker.getName(requestedPeerID)
 
 	// Only share direct addresses, never relay circuits.
 	addrStrs := c.directPeerAddresses(requestedPeerID)
 
-	c.logger.Debugf("Peer address request from %s for %s: sharing %d direct addresses", requesterName, requestedName, len(addrStrs))
+	c.logger.Debugf("Peer address request from %s for %s: sharing %d direct addresses",
+		c.peerTracker.getName(remote), c.peerTracker.getName(requestedPeerID), len(addrStrs))
 
-	response, _ := json.Marshal(addrStrs) // a []string cannot fail to marshal
-	if _, err := stream.Write(response); err != nil {
-		return
+	response, err := json.Marshal(addrStrs)
+	if err != nil {
+		return fmt.Errorf("encode response: %w", err)
 	}
-	ok = true
+	if _, err := stream.Write(response); err != nil {
+		return fmt.Errorf("write response: %w", err)
+	}
+	return nil
 }
 
 // readPeerIDRequest reads and decodes the encoded peer ID of a request.
