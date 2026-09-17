@@ -1,0 +1,102 @@
+package p2p
+
+import (
+	"fmt"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// newTestPeerID(t) is an existing helper in this package
+// (client_peer_address_test.go:38): it generates a fresh keypair and returns
+// its peer ID. Do not redefine it.
+
+func TestPeerAllowlistDisabledWhenConfigEmpty(t *testing.T) {
+	self := newTestPeerID(t)
+	stranger := newTestPeerID(t)
+
+	static := newTestPeerID(t)
+
+	// StaticPeers alone must not switch filtering on.
+	allowlist, err := newPeerAllowlist(
+		Config{StaticPeers: []string{fmt.Sprintf("/ip4/127.0.0.1/tcp/9905/p2p/%s", static)}},
+		self,
+		&captureLogger{},
+	)
+	require.NoError(t, err)
+
+	assert.False(t, allowlist.enabled())
+	assert.True(t, allowlist.allows(stranger), "a disabled allowlist allows every peer")
+	assert.True(t, allowlist.allows(static))
+}
+
+func TestPeerAllowlistNilReceiverAllowsEverything(t *testing.T) {
+	var allowlist *peerAllowlist
+
+	assert.False(t, allowlist.enabled())
+	assert.True(t, allowlist.allows(newTestPeerID(t)))
+}
+
+func TestPeerAllowlistAllowsConfiguredAndSelfRejectsOthers(t *testing.T) {
+	self := newTestPeerID(t)
+	allowed := newTestPeerID(t)
+	stranger := newTestPeerID(t)
+
+	allowlist, err := newPeerAllowlist(
+		Config{AllowedPeerIDs: []string{allowed.String()}},
+		self,
+		&captureLogger{},
+	)
+	require.NoError(t, err)
+
+	assert.True(t, allowlist.enabled())
+	assert.True(t, allowlist.allows(allowed), "configured peer is allowed")
+	assert.True(t, allowlist.allows(self), "own ID is always allowed so local publishes validate")
+	assert.False(t, allowlist.allows(stranger), "unlisted peer is rejected")
+}
+
+func TestPeerAllowlistIncludesStaticPeersButNotBootstrapPeers(t *testing.T) {
+	self := newTestPeerID(t)
+	allowed := newTestPeerID(t)
+	static := newTestPeerID(t)
+	bootstrap := newTestPeerID(t)
+
+	allowlist, err := newPeerAllowlist(
+		Config{
+			AllowedPeerIDs: []string{allowed.String()},
+			StaticPeers:    []string{fmt.Sprintf("/ip4/127.0.0.1/tcp/9905/p2p/%s", static)},
+			BootstrapPeers: []string{fmt.Sprintf("/ip4/127.0.0.1/tcp/9906/p2p/%s", bootstrap)},
+		},
+		self,
+		&captureLogger{},
+	)
+	require.NoError(t, err)
+
+	assert.True(t, allowlist.allows(static), "static peers are trusted by definition")
+	assert.False(t, allowlist.allows(bootstrap), "bootstrap is a routing role, not a trust statement")
+}
+
+func TestPeerAllowlistRejectsInvalidPeerID(t *testing.T) {
+	allowlist, err := newPeerAllowlist(
+		Config{AllowedPeerIDs: []string{"not-a-peer-id"}},
+		newTestPeerID(t),
+		&captureLogger{},
+	)
+
+	require.ErrorIs(t, err, ErrInvalidAllowedPeerID)
+	require.Nil(t, allowlist)
+}
+
+func TestPeerAllowlistLogsSetSize(t *testing.T) {
+	log := &captureLogger{}
+
+	_, err := newPeerAllowlist(
+		Config{AllowedPeerIDs: []string{newTestPeerID(t).String()}},
+		newTestPeerID(t),
+		log,
+	)
+	require.NoError(t, err)
+
+	assert.Contains(t, log.String(), "Peer allowlist enabled")
+}

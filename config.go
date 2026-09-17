@@ -101,6 +101,31 @@ type Config struct {
 	// }
 	StaticPeers []string
 
+	// AllowedPeerIDs optionally restricts which peers this node accepts pubsub
+	// messages from, on every topic. When empty (the default) messages from any
+	// peer are accepted, matching previous behaviour.
+	//
+	// Each entry is a peer ID string (e.g. "12D3KooW..."). An unparseable entry
+	// is a configuration error and NewClient fails.
+	//
+	// Matching is on the authenticated libp2p peer ID of the message author,
+	// never on the self-reported Name carried in the message envelope, which any
+	// peer can forge. GossipSub's default StrictSign policy means the author ID
+	// cannot be spoofed without the corresponding private key.
+	//
+	// Messages from peers outside the set are neither delivered to subscribers
+	// nor forwarded to the mesh, and the sender's peer score is not penalized.
+	// Connections to those peers are unaffected: they are still dialed, still
+	// relayed for, and still served the peer-address exchange protocol.
+	//
+	// When non-empty, the set is augmented with this node's own peer ID (this is
+	// required: locally published messages pass through the same validators) and
+	// with the peer IDs of StaticPeers. BootstrapPeers are NOT implicitly
+	// allowed; list them here explicitly if they publish.
+	//
+	// Example: []string{"12D3KooWA...", "12D3KooWB..."}
+	AllowedPeerIDs []string
+
 	// DHTMode specifies how this node participates in the DHT.
 	// Valid values: "server", "client", "off"
 	//
