@@ -132,14 +132,15 @@ func buildPubSubOptions(config Config, allowlist *peerAllowlist, log logger) ([]
 	// validator would reject every message, silently blackholing the node.
 	//
 	// Run inline (WithValidatorInline) rather than on the default async path: the
-	// check is a map lookup plus one log call, cheap enough that a goroutine and a
-	// slot in pubsub's global validateThrottle per inbound message would be pure
-	// overhead. Inline also preserves pubsub's original synchronous backpressure
-	// shape, which this opt-in feature should not change. The trade-off is that
-	// the Debugf below now runs on the validation worker, so a blocking logger
-	// sink would stall validation - already true elsewhere in this library
-	// (receiveMessages and the connection callbacks call the same logger), so it
-	// is not a new constraint.
+	// check is a map lookup plus a rate-limited counter bump, cheap enough that a
+	// goroutine and a slot in pubsub's global validateThrottle per inbound message
+	// would be pure overhead. Inline also preserves pubsub's original synchronous
+	// backpressure shape, which this opt-in feature should not change. The
+	// dropReporter below keeps this bounded even under a flood: it logs at most
+	// one aggregate line per dropLogInterval, so a blocking logger sink can stall
+	// validation only as often as that - already true elsewhere in this library
+	// (receiveMessages and the connection callbacks call the same logger on every
+	// event), so it is not a new constraint.
 	if allowlist.enabled() {
 		opts = append(opts, pubsub.WithDefaultValidator(pubsub.ValidatorEx(
 			func(_ context.Context, _ peer.ID, msg *pubsub.Message) pubsub.ValidationResult {
@@ -147,8 +148,7 @@ func buildPubSubOptions(config Config, allowlist *peerAllowlist, log logger) ([]
 					return pubsub.ValidationAccept
 				}
 
-				log.Debugf("Dropping message from non-allowlisted peer %s on topic %s",
-					msg.GetFrom(), msg.GetTopic())
+				allowlist.drops.recordDrop(log)
 
 				return pubsub.ValidationIgnore
 			}), pubsub.WithValidatorInline(true)))

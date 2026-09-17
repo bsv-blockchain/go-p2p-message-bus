@@ -3,6 +3,8 @@ package p2p
 import (
 	"context"
 	"fmt"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -82,6 +84,72 @@ func TestPeerAllowlistIncludesStaticPeersButNotBootstrapPeers(t *testing.T) {
 
 	assert.True(t, allowlist.allows(static), "static peers are trusted by definition")
 	assert.False(t, allowlist.allows(bootstrap), "bootstrap is a routing role, not a trust statement")
+}
+
+// TestPeerAllowlistIncludesStaticPeerIDFromRawEntryWhenResolutionFails pins
+// R1: a /dnsaddr/ static peer whose DNS lookup fails at startup is dropped by
+// parsePeerMultiaddrs (it logs and continues), so the resolved staticPeers
+// list NewClient would pass in is empty here. The peer ID is still present in
+// the raw multiaddr via an explicit /p2p/ component, so it must be learned
+// from that string directly - no resolution needed.
+func TestPeerAllowlistIncludesStaticPeerIDFromRawEntryWhenResolutionFails(t *testing.T) {
+	self := newTestPeerID(t)
+	static := newTestPeerID(t)
+
+	staticAddr := fmt.Sprintf("/dnsaddr/example.invalid/p2p/%s", static)
+
+	allowlist, err := newPeerAllowlist(
+		Config{
+			AllowedPeerIDs: []string{newTestPeerID(t).String()},
+			StaticPeers:    []string{staticAddr},
+		},
+		self,
+		nil, // simulates: DNS resolution failed, nothing came out of parsePeerMultiaddrs
+		&captureLogger{},
+	)
+	require.NoError(t, err)
+
+	assert.True(t, allowlist.allows(static),
+		"the peer ID was available in the raw multiaddr and needed no DNS resolution to learn")
+}
+
+// TestPeerAllowlistIgnoresRawStaticEntryWithoutPeerIDSuffix pins the
+// complementary case: a /dnsaddr/ entry with no /p2p/ suffix genuinely has no
+// ID to learn without resolution, so it must not appear in the allowlist and
+// must not error.
+func TestPeerAllowlistIgnoresRawStaticEntryWithoutPeerIDSuffix(t *testing.T) {
+	self := newTestPeerID(t)
+
+	allowlist, err := newPeerAllowlist(
+		Config{
+			AllowedPeerIDs: []string{newTestPeerID(t).String()},
+			StaticPeers:    []string{"/dnsaddr/example.invalid"},
+		},
+		self,
+		nil,
+		&captureLogger{},
+	)
+	require.NoError(t, err)
+	assert.True(t, allowlist.enabled())
+}
+
+// TestPeerAllowlistIgnoresMalformedRawStaticEntry pins that a malformed
+// static entry stays non-fatal for the allowlist, matching
+// parsePeerMultiaddrs' existing non-fatal handling of the same entries.
+func TestPeerAllowlistIgnoresMalformedRawStaticEntry(t *testing.T) {
+	self := newTestPeerID(t)
+
+	allowlist, err := newPeerAllowlist(
+		Config{
+			AllowedPeerIDs: []string{newTestPeerID(t).String()},
+			StaticPeers:    []string{"not-a-multiaddr"},
+		},
+		self,
+		nil,
+		&captureLogger{},
+	)
+	require.NoError(t, err)
+	assert.True(t, allowlist.enabled())
 }
 
 func TestPeerAllowlistRejectsInvalidPeerID(t *testing.T) {
@@ -190,4 +258,83 @@ func TestPublishSucceedsWithAllowlistEnabled(t *testing.T) {
 
 	require.NoError(t, cl.Publish(context.Background(), topicName, []byte("hello")),
 		"publish must succeed: the allowlist must contain the node's own peer ID")
+}
+
+// TestDropReporterFirstDropLogsAndResets pins R2: the very first drop always
+// logs (lastLog's zero value is far enough in the past), and logging resets
+// the counter.
+func TestDropReporterFirstDropLogsAndResets(t *testing.T) {
+	var r dropReporter
+	log := &captureLogger{}
+
+	r.recordDrop(log)
+
+	assert.Contains(t, log.String(), "Dropped 1 message(s) from non-allowlisted peers in the last 30s")
+	assert.Equal(t, uint64(0), r.dropped.Load(), "the winning call resets the counter")
+}
+
+// TestDropReporterSuppressesWithinInterval pins that once a window has been
+// claimed, further drops within dropLogInterval accumulate in the counter
+// without emitting another log line.
+func TestDropReporterSuppressesWithinInterval(t *testing.T) {
+	var r dropReporter
+	log := &captureLogger{}
+
+	// Force lastLog to "just now" so the next calls fall inside the window
+	// without depending on real elapsed time.
+	r.lastLog.Store(time.Now().UnixNano())
+
+	r.recordDrop(log)
+	r.recordDrop(log)
+	r.recordDrop(log)
+
+	assert.Empty(t, log.String(), "no line should be logged inside the interval")
+	assert.Equal(t, uint64(3), r.dropped.Load(), "drops still aggregate while suppressed")
+}
+
+// TestDropReporterLogsAgainAfterIntervalElapses pins that a new window opens,
+// and logs, once dropLogInterval has passed since the last emitted line.
+func TestDropReporterLogsAgainAfterIntervalElapses(t *testing.T) {
+	var r dropReporter
+	log := &captureLogger{}
+
+	r.lastLog.Store(time.Now().Add(-dropLogInterval - time.Second).UnixNano())
+	r.dropped.Store(2) // as if two drops had already accumulated in the prior window
+
+	r.recordDrop(log)
+
+	assert.Contains(t, log.String(), "Dropped 3 message(s) from non-allowlisted peers in the last 30s")
+	assert.Equal(t, uint64(0), r.dropped.Load())
+}
+
+// TestDropReporterConcurrentDropsAreRaceSafeAndNeverLoseACount pins the
+// concurrency contract under the race detector: every concurrent call
+// increments the shared counter (no lost counts), and exactly one goroutine
+// wins the right to log for the window opened by the reporter's zero value.
+func TestDropReporterConcurrentDropsAreRaceSafeAndNeverLoseACount(t *testing.T) {
+	var r dropReporter
+	log := &captureLogger{}
+
+	const goroutines = 200
+
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for range goroutines {
+		go func() {
+			defer wg.Done()
+			r.recordDrop(log)
+		}()
+	}
+	wg.Wait()
+
+	output := log.String()
+	assert.Equal(t, 1, strings.Count(output, "Dropped"), "exactly one goroutine logs the window")
+
+	var logged uint64
+	_, err := fmt.Sscanf(output, "[DEBUG] Dropped %d message(s)", &logged)
+	require.NoError(t, err)
+
+	remaining := r.dropped.Load()
+	assert.Equal(t, uint64(goroutines), logged+remaining,
+		"every call's increment must be accounted for: none lost to the race")
 }

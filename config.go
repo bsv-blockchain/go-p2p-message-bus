@@ -116,7 +116,7 @@ type Config struct {
 	// Messages from peers outside the set are neither delivered to subscribers
 	// nor forwarded to the mesh, and the sender's peer score is not penalized.
 	// Connections to those peers are unaffected: they are still dialed, still
-	// relayed for, and still served the peer-address exchange protocol.
+	// kept connected, and still served the peer-address exchange protocol.
 	//
 	// On a network where peers run GossipSub scoring, persistently failing to
 	// forward non-allowlisted peers' messages degrades this node's own mesh
@@ -126,8 +126,9 @@ type Config struct {
 	// just a cost to the excluded peers.
 	//
 	// Because non-allowlisted peers never reach receiveMessages, GetPeers() never
-	// learns their self-reported Name and reports it empty indefinitely, even
-	// though the peer is otherwise connected and tracked normally.
+	// learns their self-reported Name and reports the placeholder "unknown" for
+	// it indefinitely, even though the peer is otherwise connected and tracked
+	// normally.
 	//
 	// When non-empty, the set is augmented with this node's own peer ID (this is
 	// required: locally published messages pass through the same validators) and
