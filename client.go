@@ -157,6 +157,21 @@ func NewClient(config Config) (Client, error) {
 		return nil, ErrPrivateKeyRequired
 	}
 
+	// Derive the node's own peer ID up front: the allowlist must contain it, and
+	// building the allowlist here means an invalid entry fails before a host is
+	// created.
+	selfID, err := peer.IDFromPrivateKey(config.PrivateKey)
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("failed to derive peer ID from private key: %w", err)
+	}
+
+	allowlist, err := newPeerAllowlist(config, selfID, clientLogger)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+
 	// Build host options
 	hostOpts, err := buildHostOptions(config, clientLogger, cancel)
 	if err != nil {
@@ -199,7 +214,7 @@ func NewClient(config Config) (Client, error) {
 
 	// Create pubsub. Peer exchange is on by default; peer scoring (Sybil defence)
 	// is applied when configured. See buildPubSubOptions / EnablePeerScoring.
-	psOpts, err := buildPubSubOptions(config, clientLogger)
+	psOpts, err := buildPubSubOptions(config, allowlist, clientLogger)
 	if err != nil {
 		_ = h.Close()
 		cancel()

@@ -129,7 +129,7 @@ func TestBuildPubSubOptions(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			log := &captureLogger{}
-			opts, err := buildPubSubOptions(tt.config, log)
+			opts, err := buildPubSubOptions(tt.config, nil, log)
 			if tt.wantErr {
 				require.ErrorIs(t, err, ErrIncompletePeerScoreConfig)
 				return

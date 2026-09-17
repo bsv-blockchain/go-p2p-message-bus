@@ -1,8 +1,10 @@
 package p2p
 
 import (
+	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -99,4 +101,85 @@ func TestPeerAllowlistLogsSetSize(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Contains(t, log.String(), "Peer allowlist enabled")
+}
+
+func TestBuildPubSubOptionsAddsValidatorWhenAllowlistEnabled(t *testing.T) {
+	log := &captureLogger{}
+
+	allowlist, err := newPeerAllowlist(
+		Config{AllowedPeerIDs: []string{newTestPeerID(t).String()}},
+		newTestPeerID(t),
+		log,
+	)
+	require.NoError(t, err)
+
+	// Peer exchange is on by default and contributes one option; the allowlist
+	// validator is the second.
+	opts, err := buildPubSubOptions(Config{}, allowlist, log)
+	require.NoError(t, err)
+	require.Len(t, opts, 2)
+}
+
+func TestBuildPubSubOptionsNoValidatorWhenAllowlistDisabled(t *testing.T) {
+	log := &captureLogger{}
+
+	allowlist, err := newPeerAllowlist(Config{}, newTestPeerID(t), log)
+	require.NoError(t, err)
+
+	opts, err := buildPubSubOptions(Config{}, allowlist, log)
+	require.NoError(t, err)
+	require.Len(t, opts, 1, "peer exchange only")
+}
+
+func TestNewClientRejectsInvalidAllowedPeerID(t *testing.T) {
+	privKey, err := GeneratePrivateKey()
+	require.NoError(t, err)
+
+	cl, err := NewClient(Config{
+		Name:           testPeerName,
+		PrivateKey:     privKey,
+		AllowedPeerIDs: []string{"not-a-peer-id"},
+	})
+
+	require.ErrorIs(t, err, ErrInvalidAllowedPeerID)
+	require.Nil(t, cl)
+}
+
+// TestPublishSucceedsWithAllowlistEnabled pins the trap in this feature:
+// Topic.Publish runs the default validators synchronously via
+// validation.ValidateLocal, so a node missing from its own allowlist cannot
+// publish anything.
+func TestPublishSucceedsWithAllowlistEnabled(t *testing.T) {
+	const topicName = "allowlist-local-publish-test"
+
+	privKey, err := GeneratePrivateKey()
+	require.NoError(t, err)
+
+	cl, err := NewClient(Config{
+		Name:           testPeerName,
+		PrivateKey:     privKey,
+		Port:           0,
+		AllowedPeerIDs: []string{newTestPeerID(t).String()},
+	})
+	require.NoError(t, err)
+
+	defer func() {
+		require.NoError(t, cl.Close())
+	}()
+
+	ch := cl.Subscribe(topicName)
+	require.NotNil(t, ch)
+
+	// Subscribe joins the topic on a goroutine; wait for it before publishing.
+	c := cl.(*client)
+	require.Eventually(t, func() bool {
+		c.mu.RLock()
+		defer c.mu.RUnlock()
+		_, ok := c.topics[topicName]
+
+		return ok
+	}, 5*time.Second, 50*time.Millisecond, "topic was never joined")
+
+	require.NoError(t, cl.Publish(context.Background(), topicName, []byte("hello")),
+		"publish must succeed: the allowlist must contain the node's own peer ID")
 }

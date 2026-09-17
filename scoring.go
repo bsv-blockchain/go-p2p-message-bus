@@ -1,6 +1,7 @@
 package p2p
 
 import (
+	"context"
 	"errors"
 	"time"
 
@@ -111,12 +112,32 @@ func resolvePeerScoreConfig(config Config) (*pubsub.PeerScoreParams, *pubsub.Pee
 	return params, thresholds, nil
 }
 
-// buildPubSubOptions assembles the GossipSub options from a Config: peer exchange
-// (on unless disabled), peer scoring (off unless configured), trusted direct peers, and
-// an optional score-inspection callback. It warns when the mesh is left in the
+// buildPubSubOptions assembles the GossipSub options from a Config: the peer
+// allowlist (when configured), peer exchange (on unless disabled), peer scoring
+// (off unless configured), trusted direct peers, and an optional
+// score-inspection callback. It warns when the mesh is left in the
 // spec-violating state of peer exchange on with no scoring.
-func buildPubSubOptions(config Config, log logger) ([]pubsub.Option, error) {
+//
+// allowlist may be nil, which means no restriction.
+func buildPubSubOptions(config Config, allowlist *peerAllowlist, log logger) ([]pubsub.Option, error) {
 	var opts []pubsub.Option
+
+	// Reject messages authored outside the allowlist before they are delivered
+	// or forwarded. ValidationIgnore drops the message without penalizing the
+	// sender's score: a peer we simply do not listen to has not misbehaved.
+	if allowlist.enabled() {
+		opts = append(opts, pubsub.WithDefaultValidator(pubsub.ValidatorEx(
+			func(_ context.Context, _ peer.ID, msg *pubsub.Message) pubsub.ValidationResult {
+				if allowlist.allows(msg.GetFrom()) {
+					return pubsub.ValidationAccept
+				}
+
+				log.Debugf("Dropping message from non-allowlisted peer %s on topic %s",
+					msg.GetFrom(), msg.GetTopic())
+
+				return pubsub.ValidationIgnore
+			})))
+	}
 
 	if config.DisablePeerExchange {
 		log.Infof("GossipSub peer exchange disabled")
