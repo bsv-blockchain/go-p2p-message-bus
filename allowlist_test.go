@@ -261,15 +261,16 @@ func TestPublishSucceedsWithAllowlistEnabled(t *testing.T) {
 }
 
 // TestDropReporterFirstDropLogsAndResets pins R2: the very first drop always
-// logs (lastLog's zero value is far enough in the past), and logging resets
-// the counter.
+// logs immediately - lastLog's zero value is recordDrop's "never logged yet"
+// sentinel, bypassing the elapsed-time check rather than relying on it - and
+// logging resets the counter.
 func TestDropReporterFirstDropLogsAndResets(t *testing.T) {
 	var r dropReporter
 	log := &captureLogger{}
 
 	r.recordDrop(log)
 
-	assert.Contains(t, log.String(), "Dropped 1 message(s) from non-allowlisted peers in the last 30s")
+	assert.Contains(t, log.String(), "Dropped 1 message(s) from non-allowlisted peers since the last report")
 	assert.Equal(t, uint64(0), r.dropped.Load(), "the winning call resets the counter")
 }
 
@@ -280,9 +281,13 @@ func TestDropReporterSuppressesWithinInterval(t *testing.T) {
 	var r dropReporter
 	log := &captureLogger{}
 
-	// Force lastLog to "just now" so the next calls fall inside the window
-	// without depending on real elapsed time.
-	r.lastLog.Store(time.Now().UnixNano())
+	// Anchor start in the past and force lastLog to "just now" (relative to
+	// start) so the next calls fall inside the window without depending on
+	// real elapsed time. lastLog is deliberately non-zero here: zero is the
+	// reporter's own "never logged" sentinel, which this test is not
+	// exercising.
+	r.start = time.Now().Add(-time.Minute)
+	r.lastLog.Store(int64(time.Minute))
 
 	r.recordDrop(log)
 	r.recordDrop(log)
@@ -298,12 +303,17 @@ func TestDropReporterLogsAgainAfterIntervalElapses(t *testing.T) {
 	var r dropReporter
 	log := &captureLogger{}
 
-	r.lastLog.Store(time.Now().Add(-dropLogInterval - time.Second).UnixNano())
+	// The prior line was emitted 1ns after start (non-zero, so this exercises
+	// the elapsed-time comparison rather than the "never logged" sentinel),
+	// and start itself is far enough in the past that dropLogInterval has
+	// since elapsed.
+	r.start = time.Now().Add(-dropLogInterval - time.Second)
+	r.lastLog.Store(1)
 	r.dropped.Store(2) // as if two drops had already accumulated in the prior window
 
 	r.recordDrop(log)
 
-	assert.Contains(t, log.String(), "Dropped 3 message(s) from non-allowlisted peers in the last 30s")
+	assert.Contains(t, log.String(), "Dropped 3 message(s) from non-allowlisted peers since the last report")
 	assert.Equal(t, uint64(0), r.dropped.Load())
 }
 

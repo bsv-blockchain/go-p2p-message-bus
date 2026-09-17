@@ -84,7 +84,7 @@ func newPeerAllowlist(config Config, selfID peer.ID, staticPeers []peer.AddrInfo
 
 	log.Infof("Peer allowlist enabled: accepting pubsub messages from %d peer(s)", len(allowed))
 
-	return &peerAllowlist{allowed: allowed}, nil
+	return &peerAllowlist{allowed: allowed, drops: dropReporter{start: time.Now()}}, nil
 }
 
 // enabled reports whether the allowlist restricts anything. A nil allowlist is
@@ -111,9 +111,10 @@ const dropLogInterval = 30 * time.Second
 
 // dropReporter bounds the drop logging on the allowlist rejection path to one
 // aggregate line per dropLogInterval, with O(1) memory. It holds only a
-// counter and a timestamp - never per-peer state. The set of rejected
-// authors on a public network is unbounded, so a map keyed by peer (the
-// pattern peerTracker.shouldSkipMalformed uses for the bounded, known set of
+// counter, a start-of-life anchor, and an elapsed-time marker - never
+// per-peer state. The set of rejected authors on a public network is
+// unbounded, so a map keyed by peer (the pattern
+// peerTracker.shouldSkipMalformed uses for the bounded, known set of
 // currently-connected peers) would be a memory leak here.
 //
 // Safe for concurrent use: pubsub's validation workers call recordDrop from
@@ -121,7 +122,8 @@ const dropLogInterval = 30 * time.Second
 // the message validation hot path.
 type dropReporter struct {
 	dropped atomic.Uint64
-	lastLog atomic.Int64 // unix nanoseconds of the last emitted log line
+	lastLog atomic.Int64 // nanoseconds since start when the last line was emitted; zero means no line has been emitted yet
+	start   time.Time    // anchor for lastLog's elapsed-time comparisons. time.Since(start) reads Go's monotonic clock, so drop logging is immune to wall-clock steps (NTP corrections, manual changes) that would otherwise suppress it for an arbitrary period. newPeerAllowlist sets this to time.Now(); left zero-valued by tests that construct a dropReporter directly, which only shifts the anchor and does not affect correctness.
 }
 
 // recordDrop records one dropped message. The counter is incremented
@@ -131,20 +133,27 @@ type dropReporter struct {
 // lastLog; exactly one wins per interval, logs the aggregate count dropped
 // since then, and resets the counter. Losers simply return - having already
 // recorded their drop above.
+//
+// lastLog's zero value means no line has ever been emitted, and is treated
+// as an unconditional first log rather than run through the elapsed-time
+// check below: with a monotonic start anchor, elapsed time near the
+// reporter's start is itself near zero, so the interval check alone would
+// make the very first drop wait out a full dropLogInterval instead of
+// logging immediately.
 func (r *dropReporter) recordDrop(log logger) {
 	r.dropped.Add(1)
 
-	now := time.Now().UnixNano()
+	elapsed := time.Since(r.start).Nanoseconds()
 
 	last := r.lastLog.Load()
-	if now-last < int64(dropLogInterval) {
+	if last != 0 && elapsed-last < int64(dropLogInterval) {
 		return
 	}
 
-	if !r.lastLog.CompareAndSwap(last, now) {
+	if !r.lastLog.CompareAndSwap(last, elapsed) {
 		return // another goroutine already claimed this window
 	}
 
 	count := r.dropped.Swap(0)
-	log.Debugf("Dropped %d message(s) from non-allowlisted peers in the last %s", count, dropLogInterval)
+	log.Debugf("Dropped %d message(s) from non-allowlisted peers since the last report", count)
 }
