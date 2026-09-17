@@ -264,6 +264,31 @@ When enabled:
 - This significantly speeds up network reconnection
 - If not provided, peer caching is disabled
 
+**Restricting Which Peers You Accept Messages From:**
+
+The `AllowedPeerIDs` field restricts inbound pubsub messages to a known set of peers. It is empty by default, which accepts messages from everyone:
+
+```go
+client, err := p2p.NewClient(p2p.Config{
+    Name:       "node1",
+    PrivateKey: privKey,
+    AllowedPeerIDs: []string{
+        "12D3KooWA...",
+        "12D3KooWB...",
+    },
+})
+```
+
+When set:
+
+- Messages authored by any other peer are neither delivered to subscribers nor forwarded to the mesh
+- The sending peer's GossipSub score is not penalized — a peer you do not listen to has not misbehaved
+- Connections are unaffected: unlisted peers are still dialed, still relayed for, and still served the peer-address exchange protocol
+- Your own peer ID and the peer IDs of `StaticPeers` are added automatically; `BootstrapPeers` are not
+- An entry that is not a valid peer ID makes `NewClient` fail
+
+Filtering is on the authenticated libp2p peer ID of the message author, so it cannot be bypassed by a peer claiming another peer's `Name`. Note that this is an identity filter, not a content filter, and it does not protect against a compromised key belonging to a listed peer.
+
 **Kubernetes Support:**
 
 The `AnnounceAddrs` field allows you to specify the external addresses that your peer should advertise. This is essential in Kubernetes where the pod's internal IP differs from the externally accessible address:
