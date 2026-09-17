@@ -166,7 +166,12 @@ func NewClient(config Config) (Client, error) {
 		return nil, fmt.Errorf("failed to derive peer ID from private key: %w", err)
 	}
 
-	allowlist, err := newPeerAllowlist(config, selfID, clientLogger)
+	// Parsed once here and reused below for dialing: parsing StaticPeers twice
+	// would resolve dnsaddr entries via an uncancellable DNS lookup a second
+	// time, and could disagree with the first resolution.
+	staticPeers := parsePeerMultiaddrs(config.StaticPeers, clientLogger)
+
+	allowlist, err := newPeerAllowlist(config, selfID, staticPeers, clientLogger)
 	if err != nil {
 		cancel()
 		return nil, err
@@ -204,7 +209,6 @@ func NewClient(config Config) (Client, error) {
 	// Static peers are dialed independently of bootstrap. Unlike bootstrap
 	// peers they aren't fed into the DHT or used as relays - they're just
 	// persistent direct connections we want to keep alive.
-	staticPeers := parsePeerMultiaddrs(config.StaticPeers, clientLogger)
 	if len(staticPeers) > 0 {
 		clientLogger.Infof("Configured %d static peer(s)", len(staticPeers))
 		connectToManagedPeers(ctx, h, staticPeerKind, staticPeers, clientLogger)

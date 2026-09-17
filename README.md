@@ -284,6 +284,7 @@ When set:
 - Messages authored by any other peer are neither delivered to subscribers nor forwarded to the mesh
 - The sending peer's GossipSub score is not penalized — a peer you do not listen to has not misbehaved
 - Connections are unaffected: unlisted peers are still dialed, still relayed for, and still served the peer-address exchange protocol
+- On a network where peers run GossipSub scoring, persistently failing to forward non-allowlisted peers' messages can degrade this node's own mesh delivery score and get it pruned or graylisted, in turn degrading delivery for the allowlisted peers too
 - Your own peer ID and the peer IDs of `StaticPeers` are added automatically; `BootstrapPeers` are not
 - An entry that is not a valid peer ID makes `NewClient` fail
 

@@ -118,6 +118,17 @@ type Config struct {
 	// Connections to those peers are unaffected: they are still dialed, still
 	// relayed for, and still served the peer-address exchange protocol.
 	//
+	// On a network where peers run GossipSub scoring, persistently failing to
+	// forward non-allowlisted peers' messages degrades this node's own mesh
+	// delivery score with its peers, which can get it pruned or graylisted from
+	// the mesh - in turn degrading delivery of the allowlisted peers' messages
+	// too. This is a real cost of a narrow allowlist on a scored network, not
+	// just a cost to the excluded peers.
+	//
+	// Because non-allowlisted peers never reach receiveMessages, GetPeers() never
+	// learns their self-reported Name and reports it empty indefinitely, even
+	// though the peer is otherwise connected and tracked normally.
+	//
 	// When non-empty, the set is augmented with this node's own peer ID (this is
 	// required: locally published messages pass through the same validators) and
 	// with the peer IDs of StaticPeers. BootstrapPeers are NOT implicitly

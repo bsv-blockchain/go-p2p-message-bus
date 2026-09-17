@@ -22,10 +22,14 @@ type peerAllowlist struct {
 // empty the result is disabled. Otherwise the configured IDs are joined by
 // selfID - locally published messages pass through the same validators, so a
 // node that does not allow itself cannot publish at all - and by the peer IDs
-// of config.StaticPeers, which the config already describes as known trusted
-// peers. BootstrapPeers are deliberately excluded: bootstrap is a routing role,
-// not a trust statement, and the default list is public infrastructure.
-func newPeerAllowlist(config Config, selfID peer.ID, log logger) (*peerAllowlist, error) {
+// of staticPeers, which the config already describes as known trusted peers.
+// staticPeers must be the already-parsed result of
+// parsePeerMultiaddrs(config.StaticPeers, log): the caller (NewClient) parses
+// StaticPeers once for both dialing and the allowlist, so this function does
+// not parse it again. BootstrapPeers are deliberately excluded: bootstrap is a
+// routing role, not a trust statement, and the default list is public
+// infrastructure.
+func newPeerAllowlist(config Config, selfID peer.ID, staticPeers []peer.AddrInfo, log logger) (*peerAllowlist, error) {
 	if len(config.AllowedPeerIDs) == 0 {
 		return &peerAllowlist{}, nil
 	}
@@ -43,7 +47,7 @@ func newPeerAllowlist(config Config, selfID peer.ID, log logger) (*peerAllowlist
 
 	allowed[selfID] = struct{}{}
 
-	for _, addrInfo := range parsePeerMultiaddrs(config.StaticPeers, log) {
+	for _, addrInfo := range staticPeers {
 		allowed[addrInfo.ID] = struct{}{}
 	}
 

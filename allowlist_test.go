@@ -21,9 +21,11 @@ func TestPeerAllowlistDisabledWhenConfigEmpty(t *testing.T) {
 	static := newTestPeerID(t)
 
 	// StaticPeers alone must not switch filtering on.
+	staticAddr := fmt.Sprintf("/ip4/127.0.0.1/tcp/9905/p2p/%s", static)
 	allowlist, err := newPeerAllowlist(
-		Config{StaticPeers: []string{fmt.Sprintf("/ip4/127.0.0.1/tcp/9905/p2p/%s", static)}},
+		Config{StaticPeers: []string{staticAddr}},
 		self,
+		parsePeerMultiaddrs([]string{staticAddr}, &captureLogger{}),
 		&captureLogger{},
 	)
 	require.NoError(t, err)
@@ -48,6 +50,7 @@ func TestPeerAllowlistAllowsConfiguredAndSelfRejectsOthers(t *testing.T) {
 	allowlist, err := newPeerAllowlist(
 		Config{AllowedPeerIDs: []string{allowed.String()}},
 		self,
+		nil,
 		&captureLogger{},
 	)
 	require.NoError(t, err)
@@ -64,13 +67,15 @@ func TestPeerAllowlistIncludesStaticPeersButNotBootstrapPeers(t *testing.T) {
 	static := newTestPeerID(t)
 	bootstrap := newTestPeerID(t)
 
+	staticAddrs := []string{fmt.Sprintf("/ip4/127.0.0.1/tcp/9905/p2p/%s", static)}
 	allowlist, err := newPeerAllowlist(
 		Config{
 			AllowedPeerIDs: []string{allowed.String()},
-			StaticPeers:    []string{fmt.Sprintf("/ip4/127.0.0.1/tcp/9905/p2p/%s", static)},
+			StaticPeers:    staticAddrs,
 			BootstrapPeers: []string{fmt.Sprintf("/ip4/127.0.0.1/tcp/9906/p2p/%s", bootstrap)},
 		},
 		self,
+		parsePeerMultiaddrs(staticAddrs, &captureLogger{}),
 		&captureLogger{},
 	)
 	require.NoError(t, err)
@@ -83,6 +88,7 @@ func TestPeerAllowlistRejectsInvalidPeerID(t *testing.T) {
 	allowlist, err := newPeerAllowlist(
 		Config{AllowedPeerIDs: []string{"not-a-peer-id"}},
 		newTestPeerID(t),
+		nil,
 		&captureLogger{},
 	)
 
@@ -96,6 +102,7 @@ func TestPeerAllowlistLogsSetSize(t *testing.T) {
 	_, err := newPeerAllowlist(
 		Config{AllowedPeerIDs: []string{newTestPeerID(t).String()}},
 		newTestPeerID(t),
+		nil,
 		log,
 	)
 	require.NoError(t, err)
@@ -109,6 +116,7 @@ func TestBuildPubSubOptionsAddsValidatorWhenAllowlistEnabled(t *testing.T) {
 	allowlist, err := newPeerAllowlist(
 		Config{AllowedPeerIDs: []string{newTestPeerID(t).String()}},
 		newTestPeerID(t),
+		nil,
 		log,
 	)
 	require.NoError(t, err)
@@ -123,7 +131,7 @@ func TestBuildPubSubOptionsAddsValidatorWhenAllowlistEnabled(t *testing.T) {
 func TestBuildPubSubOptionsNoValidatorWhenAllowlistDisabled(t *testing.T) {
 	log := &captureLogger{}
 
-	allowlist, err := newPeerAllowlist(Config{}, newTestPeerID(t), log)
+	allowlist, err := newPeerAllowlist(Config{}, newTestPeerID(t), nil, log)
 	require.NoError(t, err)
 
 	opts, err := buildPubSubOptions(Config{}, allowlist, log)

@@ -125,6 +125,21 @@ func buildPubSubOptions(config Config, allowlist *peerAllowlist, log logger) ([]
 	// Reject messages authored outside the allowlist before they are delivered
 	// or forwarded. ValidationIgnore drops the message without penalizing the
 	// sender's score: a peer we simply do not listen to has not misbehaved.
+	//
+	// This depends on msg.GetFrom() being authenticated: it is only trustworthy
+	// under GossipSub's default StrictSign signature policy. If a future option
+	// ever lets a caller relax that policy, GetFrom() can return empty and this
+	// validator would reject every message, silently blackholing the node.
+	//
+	// Run inline (WithValidatorInline) rather than on the default async path: the
+	// check is a map lookup plus one log call, cheap enough that a goroutine and a
+	// slot in pubsub's global validateThrottle per inbound message would be pure
+	// overhead. Inline also preserves pubsub's original synchronous backpressure
+	// shape, which this opt-in feature should not change. The trade-off is that
+	// the Debugf below now runs on the validation worker, so a blocking logger
+	// sink would stall validation - already true elsewhere in this library
+	// (receiveMessages and the connection callbacks call the same logger), so it
+	// is not a new constraint.
 	if allowlist.enabled() {
 		opts = append(opts, pubsub.WithDefaultValidator(pubsub.ValidatorEx(
 			func(_ context.Context, _ peer.ID, msg *pubsub.Message) pubsub.ValidationResult {
@@ -136,7 +151,7 @@ func buildPubSubOptions(config Config, allowlist *peerAllowlist, log logger) ([]
 					msg.GetFrom(), msg.GetTopic())
 
 				return pubsub.ValidationIgnore
-			})))
+			}), pubsub.WithValidatorInline(true)))
 	}
 
 	if config.DisablePeerExchange {
