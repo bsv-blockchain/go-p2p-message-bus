@@ -129,7 +129,7 @@ func TestBuildPubSubOptions(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			log := &captureLogger{}
-			opts, err := buildPubSubOptions(tt.config, log)
+			opts, err := buildPubSubOptions(tt.config, nil, parsePeerMultiaddrs(tt.config.StaticPeers, log), log)
 			if tt.wantErr {
 				require.ErrorIs(t, err, ErrIncompletePeerScoreConfig)
 				return
@@ -252,13 +252,34 @@ func TestDirectPeers(t *testing.T) {
 	log := &captureLogger{}
 
 	// Same peer as both static and bootstrap should be deduplicated to one.
-	dp := directPeers(Config{
+	dedupConfig := Config{
 		StaticPeers:    []string{testDirectPeerAddr},
 		BootstrapPeers: []string{testDirectPeerAddr},
-	}, log)
+	}
+	dp := directPeers(dedupConfig, parsePeerMultiaddrs(dedupConfig.StaticPeers, log), log)
 	require.Len(t, dp, 1)
 
-	require.Empty(t, directPeers(Config{}, log))
+	require.Empty(t, directPeers(Config{}, nil, log))
+}
+
+// TestDirectPeersUsesCallersStaticPeersWithoutReparsing pins that StaticPeers
+// is resolved exactly once, by the caller: the direct-peer set must come from
+// the slice passed in, not from a second parse of config.StaticPeers. A second
+// resolution can disagree with the first, and the first is what the dialer and
+// the publisher allowlist used - a divergence would graft a permanent,
+// scoring-exempt direct link to a peer whose messages this node then drops.
+func TestDirectPeersUsesCallersStaticPeersWithoutReparsing(t *testing.T) {
+	log := &captureLogger{}
+
+	resolved := newTestPeerID(t)
+
+	// config.StaticPeers names a different peer than the resolved slice does.
+	// Re-parsing would surface testDirectPeerAddr's ID; using the caller's
+	// slice surfaces only the resolved one.
+	dp := directPeers(Config{StaticPeers: []string{testDirectPeerAddr}}, []peer.AddrInfo{{ID: resolved}}, log)
+
+	require.Len(t, dp, 1)
+	require.Equal(t, resolved, dp[0].ID)
 }
 
 // TestAppSpecificScoreOverride verifies Config.AppSpecificScore replaces the params'

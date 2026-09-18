@@ -264,6 +264,35 @@ When enabled:
 - This significantly speeds up network reconnection
 - If not provided, peer caching is disabled
 
+**Restricting Which Peers You Accept Messages From:**
+
+The `AllowedPublisherIDs` field restricts inbound pubsub messages to a known set of publishers. It gates message authorship only — not connections, not streams, not the peer-address exchange. It is empty by default, which accepts messages from everyone:
+
+```go
+client, err := p2p.NewClient(p2p.Config{
+    Name:       "node1",
+    PrivateKey: privKey,
+    AllowedPublisherIDs: []string{
+        "12D3KooWA...",
+        "12D3KooWB...",
+    },
+})
+```
+
+When set:
+
+- Messages authored by any other peer are neither delivered to subscribers nor forwarded to the mesh
+- The sending peer's GossipSub score is not penalized — a peer you do not listen to has not misbehaved
+- Connections are unaffected: unlisted peers are still dialed, still kept connected, and still served the peer-address exchange protocol
+- On a network where peers run GossipSub scoring, persistently failing to forward non-allowlisted peers' messages can degrade this node's own mesh delivery score and get it pruned or graylisted, in turn degrading delivery for the allowlisted peers too
+- Your own peer ID is added automatically, as are the peer IDs that `StaticPeers` entries name directly with a `/p2p/` component. For a relayed (`/p2p-circuit/`) address the ID taken is the target's, not the relay's. `BootstrapPeers` are not added
+- Publisher IDs come only from configuration text — `AllowedPublisherIDs` and the `/p2p/` components of `StaticPeers` — never from DNS. A bare `/dnsaddr/<host>` entry has no suffix for the resolver to filter its TXT records against, so trusting what it resolves to would let whoever answers that lookup pick this node's publishers. Such an entry contributes no ID, is warned about at startup, and the set is never rebuilt — use the `/dnsaddr/<host>/p2p/<id>` form when this allowlist is in use
+- Listing an address under `StaticPeers` therefore grants it publisher trust; listing the same address under `BootstrapPeers` does not
+- Filtered peers never reach the message-receive path, so they are never recorded as topic peers: while filtered they do not appear in `GetPeers()` output at all, even though they stay connected, and no peer-address discovery is attempted for them. `PeerCacheFile` does not follow `GetPeers()` here — it is written from the GossipSub topic peer lists, so a filtered peer is still cached and still re-dialed at the next startup. The allowlist gates messages, not connections
+- An entry that is not a valid peer ID makes `NewClient` fail
+
+Filtering is on the authenticated libp2p peer ID of the message author, so it cannot be bypassed by a peer claiming another peer's `Name`. Note that this is an identity filter, not a content filter, and it does not protect against a compromised key belonging to a listed peer. It filters on authorship, not on freshness or liveness: a message an allowlisted publisher authored once can be replayed by any peer and will be delivered as new once libp2p's seen-cache window for it has passed, so reject stale or duplicate work at the application layer if that matters.
+
 **Kubernetes Support:**
 
 The `AnnounceAddrs` field allows you to specify the external addresses that your peer should advertise. This is essential in Kubernetes where the pod's internal IP differs from the externally accessible address:

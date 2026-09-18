@@ -92,14 +92,78 @@ type Config struct {
 	// drops. Use this for known trusted peers in private/closed networks where
 	// you want guaranteed direct connectivity regardless of DHT state.
 	//
-	// Static peers are dialed in addition to BootstrapPeers; the two lists may
-	// overlap without harm.
+	// Static peers are dialed in addition to BootstrapPeers, and the same address
+	// may appear in both lists. The two are not interchangeable, though: when
+	// AllowedPublisherIDs is in use, listing an address here also grants the peer
+	// ID it names trust as a publisher, while listing it under BootstrapPeers does
+	// not. Put a peer here only if you are willing to act on the messages it
+	// publishes.
 	//
 	// Example: []string{
 	//   "/dns4/peer1.internal/tcp/9905/p2p/12D3KooW...",
 	//   "/ip4/192.168.1.10/tcp/9905/p2p/12D3KooW...",
 	// }
 	StaticPeers []string
+
+	// AllowedPublisherIDs optionally restricts which peers this node accepts
+	// pubsub messages from, on every topic. It gates message authorship only -
+	// not connections, not streams, not the peer-address exchange. When empty
+	// (the default) messages from any peer are accepted, matching previous
+	// behaviour.
+	//
+	// Each entry is a peer ID string (e.g. "12D3KooW..."). An unparseable entry
+	// is a configuration error and NewClient fails.
+	//
+	// Matching is on the authenticated libp2p peer ID of the message author,
+	// never on the self-reported Name carried in the message envelope, which any
+	// peer can forge. GossipSub's default StrictSign policy means the author ID
+	// cannot be spoofed without the corresponding private key.
+	//
+	// Messages from peers outside the set are neither delivered to subscribers
+	// nor forwarded to the mesh, and the sender's peer score is not penalized.
+	// Connections to those peers are unaffected: they are still dialed, still
+	// kept connected, and still served the peer-address exchange protocol.
+	//
+	// The filter is on authorship, not on freshness or liveness. A message an
+	// allowlisted publisher authored once can be replayed by any peer and will be
+	// delivered as new, as soon as libp2p's seen-cache window for it has passed.
+	// Reject stale or duplicate work at the application layer if that matters.
+	//
+	// On a network where peers run GossipSub scoring, persistently failing to
+	// forward non-allowlisted peers' messages degrades this node's own mesh
+	// delivery score with its peers, which can get it pruned or graylisted from
+	// the mesh - in turn degrading delivery of the allowlisted peers' messages
+	// too. This is a real cost of a narrow allowlist on a scored network, not
+	// just a cost to the excluded peers.
+	//
+	// Because non-allowlisted peers never reach receiveMessages, they are never
+	// recorded as topic peers: while filtered they do not appear in GetPeers()
+	// output at all, even though they remain connected, and no peer-address
+	// discovery is attempted for them either. PeerCacheFile does not follow
+	// GetPeers() here: it is written from the GossipSub topic peer lists, so a
+	// filtered peer is still cached and still re-dialed at the next startup.
+	// The allowlist gates messages, not connections.
+	//
+	// When non-empty, the set is augmented with this node's own peer ID (this is
+	// required: locally published messages pass through the same validators) and
+	// with the peer IDs that StaticPeers entries name directly through a /p2p/
+	// component. For a relayed address the ID taken is the target's, never the
+	// relay's.
+	//
+	// Publisher IDs are only ever read from configuration text - these entries
+	// and the /p2p/ components of StaticPeers. DNS never contributes one. A bare
+	// /dnsaddr/<host> entry carries no suffix for the resolver to filter its TXT
+	// records against, so trusting what it resolves to would let whoever answers
+	// that lookup choose which publishers this node acts on. Such an entry
+	// therefore contributes no publisher ID at all, is warned about at startup,
+	// and the set is not rebuilt later: use the /dnsaddr/<host>/p2p/<id> form
+	// when this allowlist is in use.
+	//
+	// BootstrapPeers are NOT implicitly allowed; list them here explicitly if
+	// they publish.
+	//
+	// Example: []string{"12D3KooWA...", "12D3KooWB..."}
+	AllowedPublisherIDs []string
 
 	// DHTMode specifies how this node participates in the DHT.
 	// Valid values: "server", "client", "off"

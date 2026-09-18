@@ -1,6 +1,7 @@
 package p2p
 
 import (
+	"context"
 	"errors"
 	"time"
 
@@ -111,12 +112,52 @@ func resolvePeerScoreConfig(config Config) (*pubsub.PeerScoreParams, *pubsub.Pee
 	return params, thresholds, nil
 }
 
-// buildPubSubOptions assembles the GossipSub options from a Config: peer exchange
-// (on unless disabled), peer scoring (off unless configured), trusted direct peers, and
-// an optional score-inspection callback. It warns when the mesh is left in the
+// buildPubSubOptions assembles the GossipSub options from a Config: the peer
+// allowlist (when configured), peer exchange (on unless disabled), peer scoring
+// (off unless configured), trusted direct peers, and an optional
+// score-inspection callback. It warns when the mesh is left in the
 // spec-violating state of peer exchange on with no scoring.
-func buildPubSubOptions(config Config, log logger) ([]pubsub.Option, error) {
+//
+// allowlist may be nil, which means no restriction. staticPeers must be the
+// already-parsed result of parsePeerMultiaddrs(config.StaticPeers, log), which
+// is passed on to directPeers rather than resolved again - see there.
+func buildPubSubOptions(config Config, allowlist *peerAllowlist, staticPeers []peer.AddrInfo, log logger) ([]pubsub.Option, error) {
 	var opts []pubsub.Option
+
+	// Reject messages authored outside the allowlist before they are delivered
+	// or forwarded. ValidationIgnore drops the message without penalizing the
+	// sender's score: a peer we simply do not listen to has not misbehaved.
+	//
+	// This depends on msg.GetFrom() being authenticated: it is only trustworthy
+	// under GossipSub's default StrictSign signature policy. If a future option
+	// ever lets a caller relax that policy, GetFrom() can return empty and this
+	// validator would ignore every message, blackholing the node. That failure
+	// would not be silent - the drop path reports an aggregate count at Info -
+	// but one line per dropLogInterval is easy to miss, so the policy is not one
+	// to relax casually.
+	//
+	// Run inline (WithValidatorInline) rather than on the default async path: the
+	// check is a map lookup plus a rate-limited counter bump, cheap enough that a
+	// goroutine and a slot in pubsub's global validateThrottle per inbound message
+	// would be pure overhead. Inline also preserves pubsub's original synchronous
+	// backpressure shape, which this opt-in feature should not change. The
+	// dropReporter below keeps this bounded even under a flood: it logs at most
+	// one aggregate line per dropLogInterval, so a blocking logger sink can stall
+	// validation only as often as that - already true elsewhere in this library
+	// (receiveMessages and the connection callbacks call the same logger on every
+	// event), so it is not a new constraint.
+	if allowlist.enabled() {
+		opts = append(opts, pubsub.WithDefaultValidator(pubsub.ValidatorEx(
+			func(_ context.Context, _ peer.ID, msg *pubsub.Message) pubsub.ValidationResult {
+				if allowlist.allows(msg.GetFrom()) {
+					return pubsub.ValidationAccept
+				}
+
+				allowlist.drops.recordDrop(log)
+
+				return pubsub.ValidationIgnore
+			}), pubsub.WithValidatorInline(true)))
+	}
 
 	if config.DisablePeerExchange {
 		log.Infof("GossipSub peer exchange disabled")
@@ -135,7 +176,7 @@ func buildPubSubOptions(config Config, log logger) ([]pubsub.Option, error) {
 
 		// Exempt trusted peers from scoring: direct peers bypass the mesh score checks
 		// entirely, so a graylisted score can never eclipse a static or bootstrap link.
-		if direct := directPeers(config, log); len(direct) > 0 {
+		if direct := directPeers(config, staticPeers, log); len(direct) > 0 {
 			opts = append(opts, pubsub.WithDirectPeers(direct))
 			log.Infof("GossipSub scoring: %d trusted peer(s) exempt as direct peers", len(direct))
 		}
@@ -160,11 +201,22 @@ func buildPubSubOptions(config Config, log logger) ([]pubsub.Option, error) {
 // directPeers is the deduplicated set of StaticPeers and explicitly-configured
 // BootstrapPeers, used as GossipSub direct peers. Default IPFS bootstrap peers (used
 // when BootstrapPeers is empty) are intentionally excluded - they are not trusted.
-func directPeers(config Config, log logger) []peer.AddrInfo {
+//
+// staticPeers is the caller's already-parsed config.StaticPeers. It is not
+// re-resolved here: a second resolution can disagree with the first, and the
+// first is what the dialer and the publisher allowlist both used. Diverging
+// would graft a permanent, scoring-exempt direct link to a peer whose messages
+// this node then drops. Only the static half is deduplicated this way;
+// BootstrapPeers are still parsed here, as nothing else has done so.
+func directPeers(config Config, staticPeers []peer.AddrInfo, log logger) []peer.AddrInfo {
 	seen := make(map[peer.ID]struct{})
 
+	combined := make([]peer.AddrInfo, 0, len(staticPeers))
+	combined = append(combined, staticPeers...)
+	combined = append(combined, parsePeerMultiaddrs(config.BootstrapPeers, log)...)
+
 	var out []peer.AddrInfo
-	for _, ai := range append(parsePeerMultiaddrs(config.StaticPeers, log), parsePeerMultiaddrs(config.BootstrapPeers, log)...) {
+	for _, ai := range combined {
 		if _, ok := seen[ai.ID]; ok {
 			continue
 		}
