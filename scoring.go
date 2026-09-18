@@ -112,6 +112,42 @@ func resolvePeerScoreConfig(config Config) (*pubsub.PeerScoreParams, *pubsub.Pee
 	return params, thresholds, nil
 }
 
+// allowlistValidator returns the GossipSub default validator that enforces the
+// publisher allowlist: it drops messages authored outside the allowlist before
+// they are delivered or forwarded.
+//
+// The verdict is taken from the message's authenticated author, msg.GetFrom(),
+// and never from the peer that delivered it. The propagation-source parameter
+// is deliberately discarded: deciding on it would let any allowlisted peer
+// launder a blocked peer's messages simply by forwarding them, which is a
+// complete bypass of the feature.
+//
+// A dropped message gets ValidationIgnore, never ValidationReject:
+// ValidationIgnore stops the message without penalizing the sender's score,
+// because a peer we simply do not listen to has not misbehaved. Rejecting
+// would feed the peer's InvalidMessageDeliveries penalty and let any peer
+// running peer scoring graylist an honest but unlisted peer - the opposite of
+// what Config.AllowedPublisherIDs and the README promise.
+//
+// This depends on msg.GetFrom() being authenticated: it is only trustworthy
+// under GossipSub's default StrictSign signature policy. If a future option
+// ever lets a caller relax that policy, GetFrom() can return empty and this
+// validator would ignore every message, blackholing the node. That failure
+// would not be silent - the drop path reports an aggregate count at Info -
+// but one line per dropLogInterval is easy to miss, so the policy is not one
+// to relax casually.
+func allowlistValidator(allowlist *peerAllowlist, log logger) pubsub.ValidatorEx {
+	return func(_ context.Context, _ peer.ID, msg *pubsub.Message) pubsub.ValidationResult {
+		if allowlist.allows(msg.GetFrom()) {
+			return pubsub.ValidationAccept
+		}
+
+		allowlist.drops.recordDrop(log)
+
+		return pubsub.ValidationIgnore
+	}
+}
+
 // buildPubSubOptions assembles the GossipSub options from a Config: the peer
 // allowlist (when configured), peer exchange (on unless disabled), peer scoring
 // (off unless configured), trusted direct peers, and an optional
@@ -124,39 +160,23 @@ func resolvePeerScoreConfig(config Config) (*pubsub.PeerScoreParams, *pubsub.Pee
 func buildPubSubOptions(config Config, allowlist *peerAllowlist, staticPeers []peer.AddrInfo, log logger) ([]pubsub.Option, error) {
 	var opts []pubsub.Option
 
-	// Reject messages authored outside the allowlist before they are delivered
-	// or forwarded. ValidationIgnore drops the message without penalizing the
-	// sender's score: a peer we simply do not listen to has not misbehaved.
-	//
-	// This depends on msg.GetFrom() being authenticated: it is only trustworthy
-	// under GossipSub's default StrictSign signature policy. If a future option
-	// ever lets a caller relax that policy, GetFrom() can return empty and this
-	// validator would ignore every message, blackholing the node. That failure
-	// would not be silent - the drop path reports an aggregate count at Info -
-	// but one line per dropLogInterval is easy to miss, so the policy is not one
-	// to relax casually.
+	// Drop messages authored outside the allowlist before they are delivered or
+	// forwarded - see allowlistValidator for what it decides on and why the
+	// verdict is ValidationIgnore.
 	//
 	// Run inline (WithValidatorInline) rather than on the default async path: the
 	// check is a map lookup plus a rate-limited counter bump, cheap enough that a
 	// goroutine and a slot in pubsub's global validateThrottle per inbound message
 	// would be pure overhead. Inline also preserves pubsub's original synchronous
 	// backpressure shape, which this opt-in feature should not change. The
-	// dropReporter below keeps this bounded even under a flood: it logs at most
-	// one aggregate line per dropLogInterval, so a blocking logger sink can stall
-	// validation only as often as that - already true elsewhere in this library
-	// (receiveMessages and the connection callbacks call the same logger on every
-	// event), so it is not a new constraint.
+	// dropReporter on allowlistValidator's drop path keeps this bounded even under
+	// a flood: it logs at most one aggregate line per dropLogInterval, so a
+	// blocking logger sink can stall validation only as often as that - already
+	// true elsewhere in this library (receiveMessages and the connection callbacks
+	// call the same logger on every event), so it is not a new constraint.
 	if allowlist.enabled() {
-		opts = append(opts, pubsub.WithDefaultValidator(pubsub.ValidatorEx(
-			func(_ context.Context, _ peer.ID, msg *pubsub.Message) pubsub.ValidationResult {
-				if allowlist.allows(msg.GetFrom()) {
-					return pubsub.ValidationAccept
-				}
-
-				allowlist.drops.recordDrop(log)
-
-				return pubsub.ValidationIgnore
-			}), pubsub.WithValidatorInline(true)))
+		opts = append(opts, pubsub.WithDefaultValidator(
+			allowlistValidator(allowlist, log), pubsub.WithValidatorInline(true)))
 	}
 
 	if config.DisablePeerExchange {

@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/libp2p/go-libp2p/core/crypto"
+	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/stretchr/testify/require"
 )
@@ -155,9 +157,9 @@ func TestAllowlistFiltersByAuthorNotByName(t *testing.T) {
 	requireCStaysFilteredAtA(t, chA, chB, idC)
 }
 
-// requireCStaysFilteredAtA is phase 2 of TestAllowlistFiltersByAuthorNotByName:
-// with the mesh proven live it keeps watching A and asserts C's messages never
-// arrive there.
+// requireCStaysFilteredAtA is phase 2 of TestAllowlistFiltersByAuthorNotByName
+// and of TestAllowlistFiltersForwardedAuthor: with the mesh proven live it
+// keeps watching A and asserts C's messages never arrive there.
 //
 // B's channel is drained alongside A's as a positive control on C. Without it
 // the phase would pass vacuously if C had failed to connect for some unrelated
@@ -198,4 +200,165 @@ func requireCStaysFilteredAtA(t *testing.T, chA, chB <-chan Message, idC peer.ID
 			return
 		}
 	}
+}
+
+// newLineTopologyClient builds one node of TestAllowlistFiltersForwardedAuthor
+// and registers its shutdown.
+//
+// DHT is off for every node in that test, and deliberately so: with the DHT in
+// its default server mode the nodes advertise the topic to each other and
+// A would discover C through B's provider records and dial it directly,
+// collapsing the line into a full mesh and destroying the forwarding hop the
+// test exists to exercise. With the DHT off, the only address-discovery path
+// left is attemptDirectConnectionsToTopicPeers, which walks peerTracker's topic
+// peers - and A never records C there, because peerTracker is only written from
+// receiveMessages, which C's filtered messages never reach.
+func newLineTopologyClient(t *testing.T, name string, key crypto.PrivKey, allowedPublishers []string, log logger) Client {
+	t.Helper()
+
+	cl, err := NewClient(Config{
+		Name:                name,
+		PrivateKey:          key,
+		Port:                0,
+		AllowPrivateIPs:     true,
+		DHTMode:             "off",
+		AllowedPublisherIDs: allowedPublishers,
+		Logger:              log,
+	})
+	require.NoError(t, err)
+
+	t.Cleanup(func() {
+		require.NoError(t, cl.Close())
+	})
+
+	return cl
+}
+
+// TestAllowlistFiltersForwardedAuthor pins the author-not-sender property end
+// to end, over a line topology where the two genuinely differ:
+//
+//	A <-> B <-> C
+//
+// A allowlists B only and is connected only to B. C, which A does not allow,
+// publishes; B allowlists nobody, so B accepts C's messages and forwards them
+// into the mesh, which is how they reach A - carried by an allowed peer. A must
+// still drop them.
+//
+// This is the case TestAllowlistFiltersByAuthorNotByName cannot reach: there A
+// is linked to both B and C, so the propagation source of C's messages at A is
+// C itself, and a validator filtering on the source instead of the author would
+// behave identically. Here it would not: filtering on the source would accept
+// everything B forwards, C's traffic included.
+func TestAllowlistFiltersForwardedAuthor(t *testing.T) {
+	const topicName = "allowlist-forwarded-author-test"
+
+	keyA, err := GeneratePrivateKey()
+	require.NoError(t, err)
+
+	keyB, err := GeneratePrivateKey()
+	require.NoError(t, err)
+
+	keyC, err := GeneratePrivateKey()
+	require.NoError(t, err)
+
+	idB, err := peer.IDFromPrivateKey(keyB)
+	require.NoError(t, err)
+
+	idC, err := peer.IDFromPrivateKey(keyC)
+	require.NoError(t, err)
+
+	// A's log is read at the end as the second positive control: it is the only
+	// place from which the test can observe that A's validator actually saw, and
+	// dropped, C's messages.
+	logA := &captureLogger{}
+
+	clA := newLineTopologyClient(t, "peer-a", keyA, []string{idB.String()}, logA)
+	clB := newLineTopologyClient(t, "peer-b", keyB, nil, &captureLogger{})
+	clC := newLineTopologyClient(t, "peer-c", keyC, nil, &captureLogger{})
+
+	chA := clA.Subscribe(topicName)
+	require.NotNil(t, chA)
+
+	// B's channel is the positive control, as in TestAllowlistFiltersByAuthorNotByName:
+	// B does not filter, so C's messages arriving at B prove C is publishing into
+	// a live mesh and make A's non-receipt a controlled negative.
+	chB := clB.Subscribe(topicName)
+	require.NotNil(t, chB)
+	require.NotNil(t, clC.Subscribe(topicName))
+
+	// The line: B dials A, C dials B. Nothing dials A to C.
+	addrA := loopbackAddr(t, clA.(*client))
+	addrB := loopbackAddr(t, clB.(*client))
+	require.NoError(t, clB.Connect(clB.(*client).ctx, addrA))
+	require.NoError(t, clC.Connect(clC.(*client).ctx, addrB))
+
+	requireNotConnected(t, clA.(*client), idC, "before publishing")
+
+	stop := make(chan struct{})
+	defer close(stop)
+
+	go func() {
+		ticker := time.NewTicker(250 * time.Millisecond)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				_ = clB.Publish(context.Background(), topicName, []byte("from-b"))
+				_ = clC.Publish(context.Background(), topicName, []byte("from-c"))
+			}
+		}
+	}()
+
+	// Phase 1: wait for one of B's messages, so the mesh is proven live before
+	// anything is concluded from A's silence. Anything from C fails immediately.
+	deadline := time.After(20 * time.Second)
+
+	var gotFromB bool
+
+	for !gotFromB {
+		select {
+		case msg := <-chA:
+			require.NotEqual(t, idC.String(), msg.FromID,
+				"A must not receive messages authored by C, whoever forwarded them")
+			require.Equal(t, idB.String(), msg.FromID)
+
+			gotFromB = true
+		case <-deadline:
+			t.Fatal("A never received a message from the allowlisted peer; the mesh did not form")
+		}
+	}
+
+	requireCStaysFilteredAtA(t, chA, chB, idC)
+
+	// A's silence about C must be the validator's doing, not the absence of any
+	// C traffic at A: without this the test would still pass with the validator
+	// deleted if B simply never forwarded to A. Only C is unlisted here, so the
+	// aggregate drop line can only have been caused by one of C's messages
+	// arriving from B and being filtered on its author.
+	//
+	// Polled rather than asserted outright: the observation above ends as soon as
+	// B has seen C once, which can be the same instant B forwards that message on
+	// to A. The wait only ever makes a genuine failure slower, never a failure
+	// pass.
+	require.Eventually(t, func() bool {
+		return strings.Contains(logA.String(), "from non-allowlisted peers")
+	}, 15*time.Second, 50*time.Millisecond,
+		"A never reported dropping a message: C's messages never reached A's validator, so A's non-receipt of them proves nothing")
+
+	// The line must have held for the whole observation: had A picked up a direct
+	// link to C, the propagation source of C's messages at A would have been C
+	// itself and the forwarding hop would no longer have been under test.
+	requireNotConnected(t, clA.(*client), idC, "after the observation window")
+}
+
+// requireNotConnected asserts that c has no connection to other, which is what
+// makes the line topology a line.
+func requireNotConnected(t *testing.T, c *client, other peer.ID, when string) {
+	t.Helper()
+
+	require.NotEqual(t, network.Connected, c.host.Network().Connectedness(other),
+		"A must reach C only through B, but they were directly connected %s: the forwarding hop was not exercised", when)
 }
