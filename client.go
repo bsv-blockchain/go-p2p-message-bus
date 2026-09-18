@@ -157,23 +157,13 @@ func NewClient(config Config) (Client, error) {
 		return nil, ErrPrivateKeyRequired
 	}
 
-	// Derive the node's own peer ID up front: the allowlist must contain it, and
-	// building the allowlist here means an invalid entry fails before a host is
-	// created.
-	selfID, err := peer.IDFromPrivateKey(config.PrivateKey)
-	if err != nil {
-		cancel()
-		return nil, fmt.Errorf("failed to derive peer ID from private key: %w", err)
-	}
-
 	// Parsed once here and reused below for dialing: parsing StaticPeers twice
 	// would resolve dnsaddr entries via an uncancellable DNS lookup a second
 	// time, and could disagree with the first resolution.
 	staticPeers := parsePeerMultiaddrs(config.StaticPeers, clientLogger)
 
-	allowlist, err := newPeerAllowlist(config, selfID, staticPeers, clientLogger)
+	allowlist, err := resolveAllowlist(config, staticPeers, clientLogger, cancel)
 	if err != nil {
-		cancel()
 		return nil, err
 	}
 
@@ -192,15 +182,9 @@ func NewClient(config Config) (Client, error) {
 	}
 
 	// Set up DHT (unless mode is "off")
-	var kadDHT *dht.IpfsDHT
-	if config.DHTMode == "off" {
-		clientLogger.Infof("DHT mode: off (topic-only network, no DHT peer discovery)")
-	} else {
-		var dhtErr error
-		kadDHT, dhtErr = setupDHT(ctx, h, config, bootstrapPeers, clientLogger, cancel)
-		if dhtErr != nil {
-			return nil, dhtErr
-		}
+	kadDHT, err := initDHT(ctx, h, config, bootstrapPeers, clientLogger, cancel)
+	if err != nil {
+		return nil, err
 	}
 
 	// Connect to bootstrap peers (which are also used as relay peers).
@@ -233,17 +217,7 @@ func NewClient(config Config) (Client, error) {
 	}
 
 	// Set up mDNS discovery (only if explicitly enabled)
-	var mdnsService mdns.Service
-	if config.EnableMDNS {
-		mdnsService = mdns.NewMdnsService(h, "", &discoveryNotifee{h: h, ctx: ctx, logger: clientLogger})
-		if err := mdnsService.Start(); err != nil {
-			clientLogger.Errorf("mDNS failed to start: %v", err)
-		} else {
-			clientLogger.Infof("mDNS discovery started")
-		}
-	} else {
-		clientLogger.Infof("mDNS discovery disabled (production safe default)")
-	}
+	mdnsService := startMDNS(ctx, h, config, clientLogger)
 
 	var routingDiscovery *drouting.RoutingDiscovery
 	if kadDHT != nil {
@@ -343,6 +317,25 @@ func getLogger(configLogger logger) logger {
 		return l
 	}
 	return configLogger
+}
+
+// resolveAllowlist derives the node's own peer ID up front: the allowlist must
+// contain it, and building the allowlist here means an invalid entry fails
+// before a host is created.
+func resolveAllowlist(config Config, staticPeers []peer.AddrInfo, log logger, cancel context.CancelFunc) (*peerAllowlist, error) {
+	selfID, err := peer.IDFromPrivateKey(config.PrivateKey)
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("failed to derive peer ID from private key: %w", err)
+	}
+
+	allowlist, err := newPeerAllowlist(config, selfID, staticPeers, log)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+
+	return allowlist, nil
 }
 
 // createPrivateIPConnectionGater creates a ConnectionGater that blocks private IP ranges.
@@ -498,6 +491,18 @@ func createHost(_ context.Context, hostOpts []libp2p.Option, config Config, rela
 	return h, nil
 }
 
+// initDHT sets up the DHT unless DHTMode is "off", in which case it returns
+// a nil DHT and no error.
+func initDHT(ctx context.Context, h host.Host, config Config, bootstrapPeers []peer.AddrInfo, log logger, cancel context.CancelFunc) (*dht.IpfsDHT, error) {
+	if config.DHTMode == "off" {
+		log.Infof("DHT mode: off (topic-only network, no DHT peer discovery)")
+		//nolint:nilnil // nil DHT with nil error is the valid "DHT disabled" result, mirroring the pre-extraction NewClient behaviour.
+		return nil, nil
+	}
+
+	return setupDHT(ctx, h, config, bootstrapPeers, log, cancel)
+}
+
 func setupDHT(ctx context.Context, h host.Host, config Config, bootstrapPeers []peer.AddrInfo, log logger, cancel context.CancelFunc) (*dht.IpfsDHT, error) {
 	// Determine DHT mode (default to server)
 	mode := dht.ModeServer
@@ -537,6 +542,24 @@ func setupDHT(ctx context.Context, h host.Host, config Config, bootstrapPeers []
 	}
 
 	return kadDHT, nil
+}
+
+// startMDNS starts mDNS discovery when explicitly enabled, returning the
+// running service, or nil when discovery is disabled.
+func startMDNS(ctx context.Context, h host.Host, config Config, log logger) mdns.Service {
+	if !config.EnableMDNS {
+		log.Infof("mDNS discovery disabled (production safe default)")
+		return nil
+	}
+
+	mdnsService := mdns.NewMdnsService(h, "", &discoveryNotifee{h: h, ctx: ctx, logger: log})
+	if err := mdnsService.Start(); err != nil {
+		log.Errorf("mDNS failed to start: %v", err)
+	} else {
+		log.Infof("mDNS discovery started")
+	}
+
+	return mdnsService
 }
 
 // parsePeerMultiaddrs is a shared helper to parse bootstrap peer multiaddr strings.
