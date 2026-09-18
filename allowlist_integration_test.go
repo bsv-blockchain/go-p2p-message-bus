@@ -116,10 +116,25 @@ func TestAllowlistFiltersByAuthorNotByName(t *testing.T) {
 	// observe C and the control above would be unobservable.
 	require.NoError(t, clC.Connect(clC.(*client).ctx, addrB))
 
-	// Publish repeatedly in the background: GossipSub mesh formation is not
-	// instantaneous and a single publish issued before the graft is simply lost.
+	startBackgroundPublishers(t, clB, clC, topicName)
+
+	// Phase 1: wait for one of B's messages. Anything from C fails immediately.
+	requireFirstMessageFromB(t, chA, idB, idC)
+
+	requireCStaysFilteredAtA(t, chA, chB, idC)
+}
+
+// startBackgroundPublishers publishes "from-b" from clB and "from-c" from clC
+// every 250ms for the remainder of the calling test. GossipSub mesh formation
+// is not instantaneous and a single publish issued before the graft is simply
+// lost, so both TestAllowlistFiltersByAuthorNotByName and
+// TestAllowlistFiltersForwardedAuthor need a steady stream to observe rather
+// than a one-off publish.
+func startBackgroundPublishers(t *testing.T, clB, clC Client, topicName string) {
+	t.Helper()
+
 	stop := make(chan struct{})
-	defer close(stop)
+	t.Cleanup(func() { close(stop) })
 
 	go func() {
 		ticker := time.NewTicker(250 * time.Millisecond)
@@ -135,8 +150,20 @@ func TestAllowlistFiltersByAuthorNotByName(t *testing.T) {
 			}
 		}
 	}()
+}
 
-	// Phase 1: wait for one of B's messages. Anything from C fails immediately.
+// requireFirstMessageFromB is phase 1 of TestAllowlistFiltersByAuthorNotByName
+// and of TestAllowlistFiltersForwardedAuthor: it waits for the first message
+// to reach A and requires that it came from the allowlisted peer B, never
+// from the non-allowlisted C, before phase 2 concludes anything from A's
+// later silence.
+//
+// The deadline is computed once, outside the loop: B publishes every 250ms,
+// and recreating time.After per iteration would reset the window on every
+// message, so the wait would never time out.
+func requireFirstMessageFromB(t *testing.T, chA <-chan Message, idB, idC peer.ID) {
+	t.Helper()
+
 	deadline := time.After(20 * time.Second)
 
 	var gotFromB bool
@@ -153,8 +180,6 @@ func TestAllowlistFiltersByAuthorNotByName(t *testing.T) {
 			t.Fatal("A never received a message from the allowlisted peer; the mesh did not form")
 		}
 	}
-
-	requireCStaysFilteredAtA(t, chA, chB, idC)
 }
 
 // requireCStaysFilteredAtA is phase 2 of TestAllowlistFiltersByAuthorNotByName
@@ -294,42 +319,11 @@ func TestAllowlistFiltersForwardedAuthor(t *testing.T) {
 
 	requireNotConnected(t, clA.(*client), idC, "before publishing")
 
-	stop := make(chan struct{})
-	defer close(stop)
-
-	go func() {
-		ticker := time.NewTicker(250 * time.Millisecond)
-		defer ticker.Stop()
-
-		for {
-			select {
-			case <-stop:
-				return
-			case <-ticker.C:
-				_ = clB.Publish(context.Background(), topicName, []byte("from-b"))
-				_ = clC.Publish(context.Background(), topicName, []byte("from-c"))
-			}
-		}
-	}()
+	startBackgroundPublishers(t, clB, clC, topicName)
 
 	// Phase 1: wait for one of B's messages, so the mesh is proven live before
 	// anything is concluded from A's silence. Anything from C fails immediately.
-	deadline := time.After(20 * time.Second)
-
-	var gotFromB bool
-
-	for !gotFromB {
-		select {
-		case msg := <-chA:
-			require.NotEqual(t, idC.String(), msg.FromID,
-				"A must not receive messages authored by C, whoever forwarded them")
-			require.Equal(t, idB.String(), msg.FromID)
-
-			gotFromB = true
-		case <-deadline:
-			t.Fatal("A never received a message from the allowlisted peer; the mesh did not form")
-		}
-	}
+	requireFirstMessageFromB(t, chA, idB, idC)
 
 	requireCStaysFilteredAtA(t, chA, chB, idC)
 
