@@ -26,14 +26,23 @@ type peerAllowlist struct {
 // empty the result is disabled. Otherwise the configured IDs are joined by
 // selfID - locally published messages pass through the same validators, so a
 // node that does not allow itself cannot publish at all - and by the peer IDs
-// of staticPeers, which the config already describes as known trusted peers.
-// staticPeers must be the already-parsed result of
-// parsePeerMultiaddrs(config.StaticPeers, log): the caller (NewClient) parses
-// StaticPeers once for dialing, the allowlist and the GossipSub direct-peer
-// set, so this function does not parse it again. BootstrapPeers are
-// deliberately excluded: bootstrap is a routing role, not a trust statement,
-// and the default list is public infrastructure.
-func newPeerAllowlist(config Config, selfID peer.ID, staticPeers []peer.AddrInfo, log logger) (*peerAllowlist, error) {
+// that config.StaticPeers names directly, which the config already describes
+// as known trusted peers.
+//
+// Every publisher ID comes from text the operator wrote: config.AllowedPublisherIDs
+// and the /p2p/ components of config.StaticPeers. Nothing this function reads is
+// network-derived, and it deliberately takes no resolved addresses. Feeding it
+// the parsePeerMultiaddrs output would let DNS decide who this node trusts:
+// a bare /dnsaddr/<host> entry carries no suffix for go-multiaddr-dns to filter
+// TXT records against, so every dnsaddr= record the lookup returns is accepted,
+// and a hostile resolver, an on-path spoof or a poisoned cache could name any
+// peer ID it liked. That would defeat the point of the allowlist, so the ID of
+// a static peer that does not name itself is simply never learned - see
+// warnStaticPeersWithoutPublisherID.
+//
+// BootstrapPeers are deliberately excluded too: bootstrap is a routing role,
+// not a trust statement, and the default list is public infrastructure.
+func newPeerAllowlist(config Config, selfID peer.ID, log logger) (*peerAllowlist, error) {
 	if len(config.AllowedPublisherIDs) == 0 {
 		// The zero-valued drops field is never used here: enabled() is false for
 		// this allowlist (allowed is nil), so scoring.go never registers the
@@ -57,7 +66,7 @@ func newPeerAllowlist(config Config, selfID peer.ID, staticPeers []peer.AddrInfo
 	allowed[selfID] = struct{}{}
 	fromSelf := len(allowed) - configured
 
-	fromStatic := addStaticPublisherIDs(allowed, config.StaticPeers, staticPeers, log)
+	fromStatic := addStaticPublisherIDs(allowed, config.StaticPeers, log)
 
 	// Report the configured count and what the implicit augmentation added
 	// separately: a bare total is confusing, since configuring two IDs on a
@@ -86,24 +95,17 @@ func (a *peerAllowlist) allows(id peer.ID) bool {
 	return ok
 }
 
-// addStaticPublisherIDs adds the peer IDs of the configured static peers to
-// allowed and returns how many of them were not already present.
+// addStaticPublisherIDs adds the peer IDs that the configured static peers name
+// to allowed, and returns how many of them were not already present.
 //
-// IDs arrive by two routes. resolved is the parsePeerMultiaddrs output, which
-// is authoritative but incomplete: a /dnsaddr/ entry whose DNS lookup fails at
-// startup drops out of that list entirely and, without a second route, would be
-// silently missing from the allowlist for the whole process lifetime even
-// though its peer ID was available all along. So rawEntries - the unparsed
-// config.StaticPeers strings - are scanned as well for entries that name their
-// ID directly via a /p2p/ component, which needs no resolution.
-func addStaticPublisherIDs(allowed map[peer.ID]struct{}, rawEntries []string, resolved []peer.AddrInfo, log logger) int {
+// rawEntries are the unparsed config.StaticPeers strings, and they are the only
+// input: an entry grants publisher trust exactly when it names its own ID via a
+// /p2p/ component, which needs no resolution and so cannot be influenced by
+// anything on the network. An entry that names no ID contributes nothing and is
+// warned about; see newPeerAllowlist for why resolution is not used to fill that
+// gap.
+func addStaticPublisherIDs(allowed map[peer.ID]struct{}, rawEntries []string, log logger) int {
 	before := len(allowed)
-
-	for _, addrInfo := range resolved {
-		allowed[addrInfo.ID] = struct{}{}
-	}
-
-	named := make(map[peer.ID]struct{}, len(rawEntries))
 
 	var unnamed []string
 
@@ -115,11 +117,10 @@ func addStaticPublisherIDs(allowed map[peer.ID]struct{}, rawEntries []string, re
 			continue
 		}
 
-		named[id] = struct{}{}
 		allowed[id] = struct{}{}
 	}
 
-	warnStaticPeersWithoutPublisherID(unnamed, named, resolved, log)
+	warnStaticPeersWithoutPublisherID(unnamed, log)
 
 	return len(allowed) - before
 }
@@ -150,29 +151,19 @@ func publisherIDFromRawMultiaddr(entry string) peer.ID {
 	return id
 }
 
-// warnStaticPeersWithoutPublisherID warns about static peers that contributed
-// no ID to the publisher set, when that omission can be attributed to
-// specific entries.
+// warnStaticPeersWithoutPublisherID warns about static peers that contributed no
+// ID to the publisher set.
 //
-// unnamed are the entries carrying no /p2p/ component, so their ID is only
-// knowable through resolution; named are the IDs the raw scan did learn.
-// Resolved AddrInfos carry no back-reference to the entry they came from, so
-// attribution is only possible in the negative: if every resolved ID is one a
-// raw entry already names, then no unnamed entry resolved and all of them
-// failed. If some resolved ID is unaccounted for, at least one unnamed entry
-// did resolve and the rest cannot be singled out, so nothing is reported.
-func warnStaticPeersWithoutPublisherID(unnamed []string, named map[peer.ID]struct{}, resolved []peer.AddrInfo, log logger) {
+// unnamed are the entries carrying no /p2p/ component. Since resolution grants
+// no publisher trust, such an entry contributes nothing whether or not its DNS
+// lookup succeeded, so every one of them is reported - no attribution by
+// elimination, and no configuration in which the warning goes silent.
+func warnStaticPeersWithoutPublisherID(unnamed []string, log logger) {
 	if len(unnamed) == 0 {
 		return
 	}
 
-	for _, addrInfo := range resolved {
-		if _, ok := named[addrInfo.ID]; !ok {
-			return
-		}
-	}
-
-	log.Warnf("Static peer(s) %q contributed no publisher ID: the entry does not end in a /p2p/<id> component (for a /dnsaddr/ entry, this usually means its DNS lookup failed at startup) - use the /dnsaddr/<host>/p2p/<id> form when the publisher allowlist is in use",
+	log.Warnf("Static peer(s) %q contributed no publisher ID: the entry does not end in a /p2p/<id> component, and resolved addresses are deliberately not trusted as publishers - use the /dnsaddr/<host>/p2p/<id> form when the publisher allowlist is in use",
 		unnamed)
 }
 
@@ -205,11 +196,12 @@ type dropReporter struct {
 //
 // The zero time.Time is year 1, so time.Since(start) exceeds time.Duration's
 // +-292-year range and time.Time.Sub saturates at math.MaxInt64 rather than
-// wrapping. elapsed is then permanently MaxInt64: the first recordDrop takes
-// the lastLog == 0 sentinel branch and logs, stores MaxInt64, and every later
-// call computes elapsed-last == 0 < dropLogInterval and returns. The clock is
-// frozen, not offset. dropReporter is embedded by value in peerAllowlist, so
-// this failure mode is one forgotten field away, with no compile-time signal.
+// wrapping. recordDrop's elapsed is then a constant for the life of the
+// process: the first call takes the lastLog == 0 sentinel branch and logs,
+// stores that constant, and every later call computes elapsed-last == 0 <
+// dropLogInterval and returns. The clock is frozen, not offset. dropReporter
+// is embedded by value in peerAllowlist, so this failure mode is one forgotten
+// field away, with no compile-time signal.
 func newDropReporter() dropReporter {
 	return dropReporter{start: time.Now()}
 }
@@ -227,7 +219,8 @@ func newDropReporter() dropReporter {
 // check below: with a monotonic start anchor, elapsed time near the
 // reporter's start is itself near zero, so the interval check alone would
 // make the very first drop wait out a full dropLogInterval instead of
-// logging immediately.
+// logging immediately. The sentinel is unambiguous because the marker
+// recordDrop stores is offset by a nanosecond and so is never zero itself.
 //
 // The line is emitted at Info, not Debug: it is already rate-limited to one
 // line per dropLogInterval, and "is this node dropping traffic?" is a primary
@@ -236,7 +229,14 @@ func newDropReporter() dropReporter {
 func (r *dropReporter) recordDrop(log logger) {
 	r.dropped.Add(1)
 
-	elapsed := time.Since(r.start).Nanoseconds()
+	// Offset by one nanosecond so a stored marker is never zero, which is
+	// lastLog's "never logged" sentinel. time.Since(r.start) can genuinely read
+	// 0 - a drop landing in the same tick of a coarse monotonic clock as the
+	// reporter's construction - and storing that would leave the sentinel set,
+	// so the rate limit would not engage until the clock advanced. Both sides of
+	// the comparison below carry the same offset, so it cancels out and the
+	// interval arithmetic is unchanged.
+	elapsed := time.Since(r.start).Nanoseconds() + 1
 
 	last := r.lastLog.Load()
 	if last != 0 && elapsed-last < int64(dropLogInterval) {

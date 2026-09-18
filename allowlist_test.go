@@ -3,12 +3,15 @@ package p2p
 import (
 	"context"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"go/types"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -28,7 +31,6 @@ func TestPeerAllowlistDisabledWhenConfigEmpty(t *testing.T) {
 	allowlist, err := newPeerAllowlist(
 		Config{StaticPeers: []string{staticAddr}},
 		self,
-		parsePeerMultiaddrs([]string{staticAddr}, &captureLogger{}),
 		&captureLogger{},
 	)
 	require.NoError(t, err)
@@ -53,7 +55,6 @@ func TestPeerAllowlistAllowsConfiguredAndSelfRejectsOthers(t *testing.T) {
 	allowlist, err := newPeerAllowlist(
 		Config{AllowedPublisherIDs: []string{allowed.String()}},
 		self,
-		nil,
 		&captureLogger{},
 	)
 	require.NoError(t, err)
@@ -78,7 +79,6 @@ func TestPeerAllowlistIncludesStaticPeersButNotBootstrapPeers(t *testing.T) {
 			BootstrapPeers:      []string{fmt.Sprintf("/ip4/127.0.0.1/tcp/9906/p2p/%s", bootstrap)},
 		},
 		self,
-		parsePeerMultiaddrs(staticAddrs, &captureLogger{}),
 		&captureLogger{},
 	)
 	require.NoError(t, err)
@@ -88,11 +88,11 @@ func TestPeerAllowlistIncludesStaticPeersButNotBootstrapPeers(t *testing.T) {
 }
 
 // TestPeerAllowlistIncludesStaticPeerIDFromRawEntryWhenResolutionFails pins
-// R1: a /dnsaddr/ static peer whose DNS lookup fails at startup is dropped by
-// parsePeerMultiaddrs (it logs and continues), so the resolved staticPeers
-// list NewClient would pass in is empty here. The peer ID is still present in
-// the raw multiaddr via an explicit /p2p/ component, so it must be learned
-// from that string directly - no resolution needed.
+// R1: a /dnsaddr/ static peer is admitted as a publisher from its raw config
+// string alone, whether or not its DNS lookup succeeds - the peer ID is
+// present in the multiaddr via an explicit /p2p/ component, so it is learned
+// from that string directly. Resolution never contributes a publisher ID, so
+// a lookup failure at startup costs this entry nothing.
 func TestPeerAllowlistIncludesStaticPeerIDFromRawEntryWhenResolutionFails(t *testing.T) {
 	self := newTestPeerID(t)
 	static := newTestPeerID(t)
@@ -105,7 +105,6 @@ func TestPeerAllowlistIncludesStaticPeerIDFromRawEntryWhenResolutionFails(t *tes
 			StaticPeers:         []string{staticAddr},
 		},
 		self,
-		nil, // simulates: DNS resolution failed, nothing came out of parsePeerMultiaddrs
 		&captureLogger{},
 	)
 	require.NoError(t, err)
@@ -127,7 +126,6 @@ func TestPeerAllowlistIgnoresRawStaticEntryWithoutPeerIDSuffix(t *testing.T) {
 			StaticPeers:         []string{"/dnsaddr/example.invalid"},
 		},
 		self,
-		nil,
 		&captureLogger{},
 	)
 	require.NoError(t, err)
@@ -148,7 +146,6 @@ func TestPeerAllowlistIgnoresMalformedRawStaticEntry(t *testing.T) {
 			StaticPeers:         []string{"not-a-multiaddr"},
 		},
 		self,
-		nil,
 		&captureLogger{},
 	)
 	require.NoError(t, err)
@@ -161,7 +158,6 @@ func TestPeerAllowlistRejectsInvalidPeerID(t *testing.T) {
 	allowlist, err := newPeerAllowlist(
 		Config{AllowedPublisherIDs: []string{"not-a-peer-id"}},
 		newTestPeerID(t),
-		nil,
 		&captureLogger{},
 	)
 
@@ -175,7 +171,6 @@ func TestPeerAllowlistLogsSetSize(t *testing.T) {
 	_, err := newPeerAllowlist(
 		Config{AllowedPublisherIDs: []string{newTestPeerID(t).String()}},
 		newTestPeerID(t),
-		nil,
 		log,
 	)
 	require.NoError(t, err)
@@ -189,7 +184,6 @@ func TestBuildPubSubOptionsAddsValidatorWhenAllowlistEnabled(t *testing.T) {
 	allowlist, err := newPeerAllowlist(
 		Config{AllowedPublisherIDs: []string{newTestPeerID(t).String()}},
 		newTestPeerID(t),
-		nil,
 		log,
 	)
 	require.NoError(t, err)
@@ -204,7 +198,7 @@ func TestBuildPubSubOptionsAddsValidatorWhenAllowlistEnabled(t *testing.T) {
 func TestBuildPubSubOptionsNoValidatorWhenAllowlistDisabled(t *testing.T) {
 	log := &captureLogger{}
 
-	allowlist, err := newPeerAllowlist(Config{}, newTestPeerID(t), nil, log)
+	allowlist, err := newPeerAllowlist(Config{}, newTestPeerID(t), log)
 	require.NoError(t, err)
 
 	opts, err := buildPubSubOptions(Config{}, allowlist, nil, log)
@@ -377,7 +371,6 @@ func TestPeerAllowlistCircuitAddrAllowsTargetNotRelay(t *testing.T) {
 			StaticPeers:         staticAddrs,
 		},
 		self,
-		parsePeerMultiaddrs(staticAddrs, &captureLogger{}),
 		&captureLogger{},
 	)
 	require.NoError(t, err)
@@ -400,7 +393,6 @@ func TestDropReporterFromNewPeerAllowlistLogsAcrossWindows(t *testing.T) {
 	allowlist, err := newPeerAllowlist(
 		Config{AllowedPublisherIDs: []string{newTestPeerID(t).String()}},
 		newTestPeerID(t),
-		nil,
 		log,
 	)
 	require.NoError(t, err)
@@ -422,10 +414,10 @@ func TestDropReporterFromNewPeerAllowlistLogsAcrossWindows(t *testing.T) {
 }
 
 // TestPeerAllowlistWarnsAboutStaticPeerThatContributedNoID pins that a static
-// peer which ends up in neither route - a bare /dnsaddr/ whose startup DNS
-// lookup failed, so it is absent from the resolved list, and which names no
-// /p2p/ component for the raw scan to find - is reported rather than silently
-// dropped from the publisher set for the process lifetime.
+// peer naming no /p2p/ component is reported rather than silently dropped from
+// the publisher set for the process lifetime. Since resolution grants no
+// publisher trust, this holds for every such entry unconditionally - the
+// warning has no configuration in which it goes silent.
 func TestPeerAllowlistWarnsAboutStaticPeerThatContributedNoID(t *testing.T) {
 	log := &captureLogger{}
 
@@ -435,7 +427,6 @@ func TestPeerAllowlistWarnsAboutStaticPeerThatContributedNoID(t *testing.T) {
 			StaticPeers:         []string{"/dnsaddr/example.invalid"},
 		},
 		newTestPeerID(t),
-		nil, // simulates: DNS resolution failed, nothing came out of parsePeerMultiaddrs
 		log,
 	)
 	require.NoError(t, err)
@@ -445,8 +436,7 @@ func TestPeerAllowlistWarnsAboutStaticPeerThatContributedNoID(t *testing.T) {
 }
 
 // TestPeerAllowlistDoesNotWarnWhenStaticPeerIDsAreKnown pins the negative: an
-// entry that names its ID, and one that resolved, are both accounted for, so
-// no warning is emitted.
+// entry that names its ID is accounted for, so no warning is emitted.
 func TestPeerAllowlistDoesNotWarnWhenStaticPeerIDsAreKnown(t *testing.T) {
 	log := &captureLogger{}
 
@@ -458,7 +448,6 @@ func TestPeerAllowlistDoesNotWarnWhenStaticPeerIDsAreKnown(t *testing.T) {
 			StaticPeers:         staticAddrs,
 		},
 		newTestPeerID(t),
-		parsePeerMultiaddrs(staticAddrs, &captureLogger{}),
 		log,
 	)
 	require.NoError(t, err)
@@ -466,27 +455,54 @@ func TestPeerAllowlistDoesNotWarnWhenStaticPeerIDsAreKnown(t *testing.T) {
 	assert.NotContains(t, log.String(), "contributed no publisher ID")
 }
 
-// TestPeerAllowlistDoesNotWarnWhenABareEntryResolved pins that a bare
-// /dnsaddr/ entry which did resolve is not reported: its ID reached the
-// publisher set through the resolved list even though the raw scan could not
-// see it.
-func TestPeerAllowlistDoesNotWarnWhenABareEntryResolved(t *testing.T) {
+// TestPeerAllowlistNeverTrustsDNSResolvedPublisherIDs is the regression guard
+// for the security property that publisher trust is derived only from text the
+// operator wrote.
+//
+// A bare /dnsaddr/<host> static peer carries no /p2p/ suffix, so
+// go-multiaddr-dns has nothing to filter the _dnsaddr TXT records against and
+// accepts every dnsaddr= record the lookup returns. Whoever answers that
+// lookup - a hostile resolver, an on-path spoof, a poisoned cache, a
+// compromised zone - therefore chooses the peer IDs that come back. An earlier
+// revision of newPeerAllowlist took those resolved AddrInfos and inserted their
+// IDs into the allowed set, which handed the choice of trusted publishers to
+// DNS and defeated the point of the feature.
+//
+// newPeerAllowlist now takes no resolved addresses at all, so the injection
+// path is gone by construction rather than by check; what this test pins is the
+// observable contract that survives: such an entry contributes nothing to the
+// publisher set, is warned about, and leaves the set exactly the configured IDs
+// plus this node.
+func TestPeerAllowlistNeverTrustsDNSResolvedPublisherIDs(t *testing.T) {
 	log := &captureLogger{}
 
-	resolvedID := newTestPeerID(t)
+	self := newTestPeerID(t)
+	trusted := newTestPeerID(t)
+	// Stands for any ID a dnsaddr= TXT answer for the bare entry below could
+	// have named - none of which the operator wrote down anywhere.
+	fromDNS := newTestPeerID(t)
 
-	_, err := newPeerAllowlist(
+	allowlist, err := newPeerAllowlist(
 		Config{
-			AllowedPublisherIDs: []string{newTestPeerID(t).String()},
-			StaticPeers:         []string{"/dnsaddr/example.invalid"},
+			AllowedPublisherIDs: []string{trusted.String()},
+			StaticPeers:         []string{"/dnsaddr/peers.example"},
 		},
-		newTestPeerID(t),
-		[]peer.AddrInfo{{ID: resolvedID}}, // as if the dnsaddr TXT lookup had succeeded
+		self,
 		log,
 	)
 	require.NoError(t, err)
 
-	assert.NotContains(t, log.String(), "contributed no publisher ID")
+	assert.True(t, allowlist.allows(trusted), "the operator-configured publisher must be allowed")
+	assert.True(t, allowlist.allows(self), "the node must still allow its own published messages")
+	assert.False(t, allowlist.allows(fromDNS),
+		"a peer ID that only a DNS answer could have named must never become a trusted publisher")
+	assert.Len(t, allowlist.allowed, 2,
+		"the publisher set is exactly the configured IDs plus this node - a bare /dnsaddr/ entry adds nobody")
+
+	assert.Contains(t, log.String(),
+		"accepting pubsub messages from 2 peer(s) - 1 configured, 1 for this node, 0 from StaticPeers")
+	assert.Contains(t, log.String(), "contributed no publisher ID",
+		"an entry that grants no trust must say so, whether or not its lookup would have succeeded")
 }
 
 // TestPeerAllowlistLogsConfiguredAndAugmentedCountsSeparately pins that the
@@ -504,11 +520,64 @@ func TestPeerAllowlistLogsConfiguredAndAugmentedCountsSeparately(t *testing.T) {
 			StaticPeers:         staticAddrs,
 		},
 		newTestPeerID(t),
-		parsePeerMultiaddrs(staticAddrs, &captureLogger{}),
 		log,
 	)
 	require.NoError(t, err)
 
 	assert.Contains(t, log.String(),
 		"accepting pubsub messages from 3 peer(s) - 1 configured, 1 for this node, 1 from StaticPeers")
+}
+
+// TestPeerAllowlistConstructionReadsNoResolvedAddresses is the structural half
+// of the guard above.
+//
+// TestPeerAllowlistNeverTrustsDNSResolvedPublisherIDs can only pin what the
+// allowlist does with the inputs it has; it cannot fail if someone reconnects
+// the input that was removed, because reaching that code would need a DNS
+// answer the test suite has no way to produce. So the property is asserted
+// where it actually lives: the functions that build the publisher set take no
+// resolved addresses and perform no resolution. Anything that reintroduces
+// either - a []peer.AddrInfo parameter, or a parsePeerMultiaddrs call inside
+// the builders - puts DNS back in charge of who this node trusts, and fails
+// here.
+func TestPeerAllowlistConstructionReadsNoResolvedAddresses(t *testing.T) {
+	const source = "allowlist.go"
+
+	builders := map[string]bool{
+		"newPeerAllowlist":                  true,
+		"addStaticPublisherIDs":             true,
+		"warnStaticPeersWithoutPublisherID": true,
+	}
+
+	file, err := parser.ParseFile(token.NewFileSet(), source, nil, 0)
+	require.NoError(t, err, "the allowlist source must be parseable")
+
+	seen := make(map[string]bool, len(builders))
+
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || !builders[fn.Name.Name] {
+			continue
+		}
+
+		seen[fn.Name.Name] = true
+
+		for _, param := range fn.Type.Params.List {
+			assert.NotEqual(t, "[]peer.AddrInfo", types.ExprString(param.Type),
+				"%s must not accept resolved addresses: publisher trust comes only from config text", fn.Name.Name)
+		}
+
+		ast.Inspect(fn, func(n ast.Node) bool {
+			if ident, ok := n.(*ast.Ident); ok {
+				assert.NotEqual(t, "parsePeerMultiaddrs", ident.Name,
+					"%s must not resolve anything: a DNS answer must never reach the publisher set", fn.Name.Name)
+			}
+
+			return true
+		})
+	}
+
+	for name := range builders {
+		assert.True(t, seen[name], "%s was not found in %s - did it move? this guard must follow it", name, source)
+	}
 }

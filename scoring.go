@@ -131,7 +131,10 @@ func buildPubSubOptions(config Config, allowlist *peerAllowlist, staticPeers []p
 	// This depends on msg.GetFrom() being authenticated: it is only trustworthy
 	// under GossipSub's default StrictSign signature policy. If a future option
 	// ever lets a caller relax that policy, GetFrom() can return empty and this
-	// validator would reject every message, silently blackholing the node.
+	// validator would ignore every message, blackholing the node. That failure
+	// would not be silent - the drop path reports an aggregate count at Info -
+	// but one line per dropLogInterval is easy to miss, so the policy is not one
+	// to relax casually.
 	//
 	// Run inline (WithValidatorInline) rather than on the default async path: the
 	// check is a map lookup plus a rate-limited counter bump, cheap enough that a

@@ -157,13 +157,15 @@ func NewClient(config Config) (Client, error) {
 		return nil, ErrPrivateKeyRequired
 	}
 
-	// Parsed exactly once here and reused for every consumer - dialing below,
-	// the publisher allowlist, and the GossipSub direct-peer set. Parsing
-	// StaticPeers again would resolve dnsaddr entries via an uncancellable DNS
-	// lookup a second time, and could disagree with the first resolution.
+	// Parsed exactly once here and reused for every consumer - dialing below and
+	// the GossipSub direct-peer set. Parsing StaticPeers again would resolve
+	// dnsaddr entries via an uncancellable DNS lookup a second time, and could
+	// disagree with the first resolution. The publisher allowlist deliberately
+	// does not consume this: it reads the raw config strings instead, so that no
+	// DNS answer can add a publisher - see newPeerAllowlist.
 	staticPeers := parsePeerMultiaddrs(config.StaticPeers, clientLogger)
 
-	allowlist, err := resolveAllowlist(config, staticPeers, clientLogger, cancel)
+	allowlist, err := resolveAllowlist(config, clientLogger, cancel)
 	if err != nil {
 		return nil, err
 	}
@@ -323,14 +325,14 @@ func getLogger(configLogger logger) logger {
 // resolveAllowlist derives the node's own peer ID up front: the allowlist must
 // contain it, and building the allowlist here means an invalid entry fails
 // before a host is created.
-func resolveAllowlist(config Config, staticPeers []peer.AddrInfo, log logger, cancel context.CancelFunc) (*peerAllowlist, error) {
+func resolveAllowlist(config Config, log logger, cancel context.CancelFunc) (*peerAllowlist, error) {
 	selfID, err := peer.IDFromPrivateKey(config.PrivateKey)
 	if err != nil {
 		cancel()
 		return nil, fmt.Errorf("failed to derive peer ID from private key: %w", err)
 	}
 
-	allowlist, err := newPeerAllowlist(config, selfID, staticPeers, log)
+	allowlist, err := newPeerAllowlist(config, selfID, log)
 	if err != nil {
 		cancel()
 		return nil, err
