@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -50,7 +51,7 @@ func TestPeerAllowlistAllowsConfiguredAndSelfRejectsOthers(t *testing.T) {
 	stranger := newTestPeerID(t)
 
 	allowlist, err := newPeerAllowlist(
-		Config{AllowedPeerIDs: []string{allowed.String()}},
+		Config{AllowedPublisherIDs: []string{allowed.String()}},
 		self,
 		nil,
 		&captureLogger{},
@@ -72,9 +73,9 @@ func TestPeerAllowlistIncludesStaticPeersButNotBootstrapPeers(t *testing.T) {
 	staticAddrs := []string{fmt.Sprintf("/ip4/127.0.0.1/tcp/9905/p2p/%s", static)}
 	allowlist, err := newPeerAllowlist(
 		Config{
-			AllowedPeerIDs: []string{allowed.String()},
-			StaticPeers:    staticAddrs,
-			BootstrapPeers: []string{fmt.Sprintf("/ip4/127.0.0.1/tcp/9906/p2p/%s", bootstrap)},
+			AllowedPublisherIDs: []string{allowed.String()},
+			StaticPeers:         staticAddrs,
+			BootstrapPeers:      []string{fmt.Sprintf("/ip4/127.0.0.1/tcp/9906/p2p/%s", bootstrap)},
 		},
 		self,
 		parsePeerMultiaddrs(staticAddrs, &captureLogger{}),
@@ -100,8 +101,8 @@ func TestPeerAllowlistIncludesStaticPeerIDFromRawEntryWhenResolutionFails(t *tes
 
 	allowlist, err := newPeerAllowlist(
 		Config{
-			AllowedPeerIDs: []string{newTestPeerID(t).String()},
-			StaticPeers:    []string{staticAddr},
+			AllowedPublisherIDs: []string{newTestPeerID(t).String()},
+			StaticPeers:         []string{staticAddr},
 		},
 		self,
 		nil, // simulates: DNS resolution failed, nothing came out of parsePeerMultiaddrs
@@ -122,8 +123,8 @@ func TestPeerAllowlistIgnoresRawStaticEntryWithoutPeerIDSuffix(t *testing.T) {
 
 	allowlist, err := newPeerAllowlist(
 		Config{
-			AllowedPeerIDs: []string{newTestPeerID(t).String()},
-			StaticPeers:    []string{"/dnsaddr/example.invalid"},
+			AllowedPublisherIDs: []string{newTestPeerID(t).String()},
+			StaticPeers:         []string{"/dnsaddr/example.invalid"},
 		},
 		self,
 		nil,
@@ -131,6 +132,8 @@ func TestPeerAllowlistIgnoresRawStaticEntryWithoutPeerIDSuffix(t *testing.T) {
 	)
 	require.NoError(t, err)
 	assert.True(t, allowlist.enabled())
+	assert.False(t, allowlist.allows(""),
+		"an entry with no /p2p/ component must be skipped, never inserted as a zero peer.ID")
 }
 
 // TestPeerAllowlistIgnoresMalformedRawStaticEntry pins that a malformed
@@ -141,8 +144,8 @@ func TestPeerAllowlistIgnoresMalformedRawStaticEntry(t *testing.T) {
 
 	allowlist, err := newPeerAllowlist(
 		Config{
-			AllowedPeerIDs: []string{newTestPeerID(t).String()},
-			StaticPeers:    []string{"not-a-multiaddr"},
+			AllowedPublisherIDs: []string{newTestPeerID(t).String()},
+			StaticPeers:         []string{"not-a-multiaddr"},
 		},
 		self,
 		nil,
@@ -150,17 +153,19 @@ func TestPeerAllowlistIgnoresMalformedRawStaticEntry(t *testing.T) {
 	)
 	require.NoError(t, err)
 	assert.True(t, allowlist.enabled())
+	assert.False(t, allowlist.allows(""),
+		"a malformed entry must be skipped, never inserted as a zero peer.ID")
 }
 
 func TestPeerAllowlistRejectsInvalidPeerID(t *testing.T) {
 	allowlist, err := newPeerAllowlist(
-		Config{AllowedPeerIDs: []string{"not-a-peer-id"}},
+		Config{AllowedPublisherIDs: []string{"not-a-peer-id"}},
 		newTestPeerID(t),
 		nil,
 		&captureLogger{},
 	)
 
-	require.ErrorIs(t, err, ErrInvalidAllowedPeerID)
+	require.ErrorIs(t, err, ErrInvalidAllowedPublisherID)
 	require.Nil(t, allowlist)
 }
 
@@ -168,7 +173,7 @@ func TestPeerAllowlistLogsSetSize(t *testing.T) {
 	log := &captureLogger{}
 
 	_, err := newPeerAllowlist(
-		Config{AllowedPeerIDs: []string{newTestPeerID(t).String()}},
+		Config{AllowedPublisherIDs: []string{newTestPeerID(t).String()}},
 		newTestPeerID(t),
 		nil,
 		log,
@@ -182,7 +187,7 @@ func TestBuildPubSubOptionsAddsValidatorWhenAllowlistEnabled(t *testing.T) {
 	log := &captureLogger{}
 
 	allowlist, err := newPeerAllowlist(
-		Config{AllowedPeerIDs: []string{newTestPeerID(t).String()}},
+		Config{AllowedPublisherIDs: []string{newTestPeerID(t).String()}},
 		newTestPeerID(t),
 		nil,
 		log,
@@ -191,7 +196,7 @@ func TestBuildPubSubOptionsAddsValidatorWhenAllowlistEnabled(t *testing.T) {
 
 	// Peer exchange is on by default and contributes one option; the allowlist
 	// validator is the second.
-	opts, err := buildPubSubOptions(Config{}, allowlist, log)
+	opts, err := buildPubSubOptions(Config{}, allowlist, nil, log)
 	require.NoError(t, err)
 	require.Len(t, opts, 2)
 }
@@ -202,22 +207,22 @@ func TestBuildPubSubOptionsNoValidatorWhenAllowlistDisabled(t *testing.T) {
 	allowlist, err := newPeerAllowlist(Config{}, newTestPeerID(t), nil, log)
 	require.NoError(t, err)
 
-	opts, err := buildPubSubOptions(Config{}, allowlist, log)
+	opts, err := buildPubSubOptions(Config{}, allowlist, nil, log)
 	require.NoError(t, err)
 	require.Len(t, opts, 1, "peer exchange only")
 }
 
-func TestNewClientRejectsInvalidAllowedPeerID(t *testing.T) {
+func TestNewClientRejectsInvalidAllowedPublisherID(t *testing.T) {
 	privKey, err := GeneratePrivateKey()
 	require.NoError(t, err)
 
 	cl, err := NewClient(Config{
-		Name:           testPeerName,
-		PrivateKey:     privKey,
-		AllowedPeerIDs: []string{"not-a-peer-id"},
+		Name:                testPeerName,
+		PrivateKey:          privKey,
+		AllowedPublisherIDs: []string{"not-a-peer-id"},
 	})
 
-	require.ErrorIs(t, err, ErrInvalidAllowedPeerID)
+	require.ErrorIs(t, err, ErrInvalidAllowedPublisherID)
 	require.Nil(t, cl)
 }
 
@@ -232,10 +237,10 @@ func TestPublishSucceedsWithAllowlistEnabled(t *testing.T) {
 	require.NoError(t, err)
 
 	cl, err := NewClient(Config{
-		Name:           testPeerName,
-		PrivateKey:     privKey,
-		Port:           0,
-		AllowedPeerIDs: []string{newTestPeerID(t).String()},
+		Name:                testPeerName,
+		PrivateKey:          privKey,
+		Port:                0,
+		AllowedPublisherIDs: []string{newTestPeerID(t).String()},
 	})
 	require.NoError(t, err)
 
@@ -265,7 +270,7 @@ func TestPublishSucceedsWithAllowlistEnabled(t *testing.T) {
 // sentinel, bypassing the elapsed-time check rather than relying on it - and
 // logging resets the counter.
 func TestDropReporterFirstDropLogsAndResets(t *testing.T) {
-	var r dropReporter
+	r := newDropReporter()
 	log := &captureLogger{}
 
 	r.recordDrop(log)
@@ -278,7 +283,7 @@ func TestDropReporterFirstDropLogsAndResets(t *testing.T) {
 // claimed, further drops within dropLogInterval accumulate in the counter
 // without emitting another log line.
 func TestDropReporterSuppressesWithinInterval(t *testing.T) {
-	var r dropReporter
+	r := newDropReporter()
 	log := &captureLogger{}
 
 	// Anchor start in the past and force lastLog to "just now" (relative to
@@ -300,7 +305,7 @@ func TestDropReporterSuppressesWithinInterval(t *testing.T) {
 // TestDropReporterLogsAgainAfterIntervalElapses pins that a new window opens,
 // and logs, once dropLogInterval has passed since the last emitted line.
 func TestDropReporterLogsAgainAfterIntervalElapses(t *testing.T) {
-	var r dropReporter
+	r := newDropReporter()
 	log := &captureLogger{}
 
 	// The prior line was emitted 1ns after start (non-zero, so this exercises
@@ -320,9 +325,9 @@ func TestDropReporterLogsAgainAfterIntervalElapses(t *testing.T) {
 // TestDropReporterConcurrentDropsAreRaceSafeAndNeverLoseACount pins the
 // concurrency contract under the race detector: every concurrent call
 // increments the shared counter (no lost counts), and exactly one goroutine
-// wins the right to log for the window opened by the reporter's zero value.
+// wins the right to log for the reporter's first window.
 func TestDropReporterConcurrentDropsAreRaceSafeAndNeverLoseACount(t *testing.T) {
-	var r dropReporter
+	r := newDropReporter()
 	log := &captureLogger{}
 
 	const goroutines = 200
@@ -341,10 +346,169 @@ func TestDropReporterConcurrentDropsAreRaceSafeAndNeverLoseACount(t *testing.T) 
 	assert.Equal(t, 1, strings.Count(output, "Dropped"), "exactly one goroutine logs the window")
 
 	var logged uint64
-	_, err := fmt.Sscanf(output, "[DEBUG] Dropped %d message(s)", &logged)
+	_, err := fmt.Sscanf(output, "[INFO] Dropped %d message(s)", &logged)
 	require.NoError(t, err)
 
 	remaining := r.dropped.Load()
 	assert.Equal(t, uint64(goroutines), logged+remaining,
 		"every call's increment must be accounted for: none lost to the race")
+}
+
+// TestPeerAllowlistCircuitAddrAllowsTargetNotRelay pins the p2p-circuit
+// hazard: a relayed static peer address carries two /p2p/ components, the
+// relay's first and the target's last. The dialing path resolves such an
+// address to the TARGET (peer.AddrInfoFromP2pAddr -> peer.SplitAddr, which
+// takes the last component), so the allowlist must agree. Taking the first
+// component instead would silently admit the relay - which in this library is
+// a bootstrap peer, i.e. exactly the public infrastructure the design
+// excludes.
+func TestPeerAllowlistCircuitAddrAllowsTargetNotRelay(t *testing.T) {
+	self := newTestPeerID(t)
+	relay := newTestPeerID(t)
+	target := newTestPeerID(t)
+
+	staticAddrs := []string{
+		fmt.Sprintf("/ip4/1.2.3.4/tcp/4001/p2p/%s/p2p-circuit/p2p/%s", relay, target),
+	}
+
+	allowlist, err := newPeerAllowlist(
+		Config{
+			AllowedPublisherIDs: []string{newTestPeerID(t).String()},
+			StaticPeers:         staticAddrs,
+		},
+		self,
+		parsePeerMultiaddrs(staticAddrs, &captureLogger{}),
+		&captureLogger{},
+	)
+	require.NoError(t, err)
+
+	assert.True(t, allowlist.allows(target),
+		"the relayed target is the configured static peer and must be allowed")
+	assert.False(t, allowlist.allows(relay),
+		"the relay merely carries the traffic and must not be admitted as a publisher")
+}
+
+// TestDropReporterFromNewPeerAllowlistLogsAcrossWindows covers the production
+// anchor, which no other reporter test does: it builds the reporter the way
+// NewClient does, through newPeerAllowlist, and proves it still logs in a
+// second window. A zero-valued start saturates time.Since at math.MaxInt64, so
+// the reporter would log exactly once and then stay silent for the life of the
+// process; this test fails outright in that configuration.
+func TestDropReporterFromNewPeerAllowlistLogsAcrossWindows(t *testing.T) {
+	log := &captureLogger{}
+
+	allowlist, err := newPeerAllowlist(
+		Config{AllowedPublisherIDs: []string{newTestPeerID(t).String()}},
+		newTestPeerID(t),
+		nil,
+		log,
+	)
+	require.NoError(t, err)
+
+	require.False(t, allowlist.allows(newTestPeerID(t)), "precondition: the reporter is on a live rejection path")
+
+	// First window: the first drop always logs.
+	allowlist.drops.recordDrop(log)
+
+	// Open a second window without sleeping by rewinding the anchor one
+	// interval, which advances time.Since(start) by exactly that much. lastLog
+	// is left exactly as recordDrop set it. Under a zero-valued anchor this has
+	// no effect at all, because the elapsed time is already saturated.
+	allowlist.drops.start = allowlist.drops.start.Add(-dropLogInterval)
+	allowlist.drops.recordDrop(log)
+
+	assert.Equal(t, 2, strings.Count(log.String(), "Dropped"),
+		"a reporter built the production way must keep logging in later windows")
+}
+
+// TestPeerAllowlistWarnsAboutStaticPeerThatContributedNoID pins that a static
+// peer which ends up in neither route - a bare /dnsaddr/ whose startup DNS
+// lookup failed, so it is absent from the resolved list, and which names no
+// /p2p/ component for the raw scan to find - is reported rather than silently
+// dropped from the publisher set for the process lifetime.
+func TestPeerAllowlistWarnsAboutStaticPeerThatContributedNoID(t *testing.T) {
+	log := &captureLogger{}
+
+	_, err := newPeerAllowlist(
+		Config{
+			AllowedPublisherIDs: []string{newTestPeerID(t).String()},
+			StaticPeers:         []string{"/dnsaddr/example.invalid"},
+		},
+		newTestPeerID(t),
+		nil, // simulates: DNS resolution failed, nothing came out of parsePeerMultiaddrs
+		log,
+	)
+	require.NoError(t, err)
+
+	assert.Contains(t, log.String(), "contributed no publisher ID")
+	assert.Contains(t, log.String(), "/dnsaddr/example.invalid")
+}
+
+// TestPeerAllowlistDoesNotWarnWhenStaticPeerIDsAreKnown pins the negative: an
+// entry that names its ID, and one that resolved, are both accounted for, so
+// no warning is emitted.
+func TestPeerAllowlistDoesNotWarnWhenStaticPeerIDsAreKnown(t *testing.T) {
+	log := &captureLogger{}
+
+	staticAddrs := []string{fmt.Sprintf("/ip4/127.0.0.1/tcp/9905/p2p/%s", newTestPeerID(t))}
+
+	_, err := newPeerAllowlist(
+		Config{
+			AllowedPublisherIDs: []string{newTestPeerID(t).String()},
+			StaticPeers:         staticAddrs,
+		},
+		newTestPeerID(t),
+		parsePeerMultiaddrs(staticAddrs, &captureLogger{}),
+		log,
+	)
+	require.NoError(t, err)
+
+	assert.NotContains(t, log.String(), "contributed no publisher ID")
+}
+
+// TestPeerAllowlistDoesNotWarnWhenABareEntryResolved pins that a bare
+// /dnsaddr/ entry which did resolve is not reported: its ID reached the
+// publisher set through the resolved list even though the raw scan could not
+// see it.
+func TestPeerAllowlistDoesNotWarnWhenABareEntryResolved(t *testing.T) {
+	log := &captureLogger{}
+
+	resolvedID := newTestPeerID(t)
+
+	_, err := newPeerAllowlist(
+		Config{
+			AllowedPublisherIDs: []string{newTestPeerID(t).String()},
+			StaticPeers:         []string{"/dnsaddr/example.invalid"},
+		},
+		newTestPeerID(t),
+		[]peer.AddrInfo{{ID: resolvedID}}, // as if the dnsaddr TXT lookup had succeeded
+		log,
+	)
+	require.NoError(t, err)
+
+	assert.NotContains(t, log.String(), "contributed no publisher ID")
+}
+
+// TestPeerAllowlistLogsConfiguredAndAugmentedCountsSeparately pins that the
+// startup line distinguishes the configured publisher IDs from what the
+// implicit augmentation added, so an operator who configures one ID is not
+// left wondering why the node reports three.
+func TestPeerAllowlistLogsConfiguredAndAugmentedCountsSeparately(t *testing.T) {
+	log := &captureLogger{}
+
+	staticAddrs := []string{fmt.Sprintf("/ip4/127.0.0.1/tcp/9905/p2p/%s", newTestPeerID(t))}
+
+	_, err := newPeerAllowlist(
+		Config{
+			AllowedPublisherIDs: []string{newTestPeerID(t).String()},
+			StaticPeers:         staticAddrs,
+		},
+		newTestPeerID(t),
+		parsePeerMultiaddrs(staticAddrs, &captureLogger{}),
+		log,
+	)
+	require.NoError(t, err)
+
+	assert.Contains(t, log.String(),
+		"accepting pubsub messages from 3 peer(s) - 1 configured, 1 for this node, 1 from StaticPeers")
 }

@@ -55,11 +55,11 @@ func TestAllowlistFiltersByAuthorNotByName(t *testing.T) {
 	require.NoError(t, err)
 
 	clA, err := NewClient(Config{
-		Name:            "peer-a",
-		PrivateKey:      keyA,
-		Port:            0,
-		AllowPrivateIPs: true,
-		AllowedPeerIDs:  []string{idB.String()},
+		Name:                "peer-a",
+		PrivateKey:          keyA,
+		Port:                0,
+		AllowPrivateIPs:     true,
+		AllowedPublisherIDs: []string{idB.String()},
 	})
 	require.NoError(t, err)
 
@@ -95,12 +95,24 @@ func TestAllowlistFiltersByAuthorNotByName(t *testing.T) {
 
 	chA := clA.Subscribe(topicName)
 	require.NotNil(t, chA)
-	require.NotNil(t, clB.Subscribe(topicName))
+
+	// B's channel is drained in phase 2 as the positive control for C: B does
+	// not filter, so if C's messages reach B then C is genuinely publishing
+	// into a live mesh and A's non-receipt is a real result rather than an
+	// artifact of C never having grafted.
+	chB := clB.Subscribe(topicName)
+	require.NotNil(t, chB)
 	require.NotNil(t, clC.Subscribe(topicName))
 
 	addrA := loopbackAddr(t, clA.(*client))
+	addrB := loopbackAddr(t, clB.(*client))
 	require.NoError(t, clB.Connect(clB.(*client).ctx, addrA))
 	require.NoError(t, clC.Connect(clC.(*client).ctx, addrA))
+
+	// C also peers with B directly. A ignores C's messages and therefore never
+	// forwards them, so without this link there is no path by which B could
+	// observe C and the control above would be unobservable.
+	require.NoError(t, clC.Connect(clC.(*client).ctx, addrB))
 
 	// Publish repeatedly in the background: GossipSub mesh formation is not
 	// instantaneous and a single publish issued before the graft is simply lost.
@@ -140,19 +152,49 @@ func TestAllowlistFiltersByAuthorNotByName(t *testing.T) {
 		}
 	}
 
-	// Phase 2: the mesh is proven live, so keep watching for a while and confirm
-	// C stays filtered. The deadline is computed once, outside the loop: B keeps
-	// publishing every 250ms, and recreating time.After per iteration would keep
-	// resetting the window on every message from B, so the observation would
-	// never end.
-	observationDeadline := time.After(5 * time.Second)
+	requireCStaysFilteredAtA(t, chA, chB, idC)
+}
 
-	for {
+// requireCStaysFilteredAtA is phase 2 of TestAllowlistFiltersByAuthorNotByName:
+// with the mesh proven live it keeps watching A and asserts C's messages never
+// arrive there.
+//
+// B's channel is drained alongside A's as a positive control on C. Without it
+// the phase would pass vacuously if C had failed to connect for some unrelated
+// reason - and would keep passing with the validator deleted. B does not
+// filter, so C's messages reaching B establishes that C is publishing into a
+// live mesh and makes A's non-receipt a controlled negative.
+//
+// The observation ends once both hold: at least 5s of A seeing nothing from C,
+// and B having seen C at least once. The second can take longer than the first
+// if the C-B graft is slow, so it gets its own, longer deadline. Both deadlines
+// are computed once, outside the loop: B publishes every 250ms, and recreating
+// them per iteration would reset the window on every message, so the
+// observation would never end.
+func requireCStaysFilteredAtA(t *testing.T, chA, chB <-chan Message, idC peer.ID) {
+	t.Helper()
+
+	observationDeadline := time.After(5 * time.Second)
+	controlDeadline := time.After(30 * time.Second)
+
+	var observed, gotFromCAtB bool
+
+	for !observed || !gotFromCAtB {
 		select {
 		case msg := <-chA:
 			require.NotEqual(t, idC.String(), msg.FromID,
 				"A must not receive messages authored by the non-allowlisted peer")
+		case msg := <-chB:
+			if msg.FromID == idC.String() {
+				gotFromCAtB = true
+			}
 		case <-observationDeadline:
+			observed = true
+			observationDeadline = nil // a nil channel blocks forever: do not re-fire
+		case <-controlDeadline:
+			require.True(t, gotFromCAtB,
+				"B, which does not filter, never received C's messages: C was not publishing into a live mesh, so A's non-receipt proves nothing")
+
 			return
 		}
 	}

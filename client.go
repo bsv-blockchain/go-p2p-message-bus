@@ -157,9 +157,10 @@ func NewClient(config Config) (Client, error) {
 		return nil, ErrPrivateKeyRequired
 	}
 
-	// Parsed once here and reused below for dialing: parsing StaticPeers twice
-	// would resolve dnsaddr entries via an uncancellable DNS lookup a second
-	// time, and could disagree with the first resolution.
+	// Parsed exactly once here and reused for every consumer - dialing below,
+	// the publisher allowlist, and the GossipSub direct-peer set. Parsing
+	// StaticPeers again would resolve dnsaddr entries via an uncancellable DNS
+	// lookup a second time, and could disagree with the first resolution.
 	staticPeers := parsePeerMultiaddrs(config.StaticPeers, clientLogger)
 
 	allowlist, err := resolveAllowlist(config, staticPeers, clientLogger, cancel)
@@ -202,7 +203,7 @@ func NewClient(config Config) (Client, error) {
 
 	// Create pubsub. Peer exchange is on by default; peer scoring (Sybil defence)
 	// is applied when configured. See buildPubSubOptions / EnablePeerScoring.
-	psOpts, err := buildPubSubOptions(config, allowlist, clientLogger)
+	psOpts, err := buildPubSubOptions(config, allowlist, staticPeers, clientLogger)
 	if err != nil {
 		_ = h.Close()
 		cancel()

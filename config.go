@@ -101,9 +101,11 @@ type Config struct {
 	// }
 	StaticPeers []string
 
-	// AllowedPeerIDs optionally restricts which peers this node accepts pubsub
-	// messages from, on every topic. When empty (the default) messages from any
-	// peer are accepted, matching previous behaviour.
+	// AllowedPublisherIDs optionally restricts which peers this node accepts
+	// pubsub messages from, on every topic. It gates message authorship only -
+	// not connections, not streams, not the peer-address exchange. When empty
+	// (the default) messages from any peer are accepted, matching previous
+	// behaviour.
 	//
 	// Each entry is a peer ID string (e.g. "12D3KooW..."). An unparseable entry
 	// is a configuration error and NewClient fails.
@@ -125,18 +127,25 @@ type Config struct {
 	// too. This is a real cost of a narrow allowlist on a scored network, not
 	// just a cost to the excluded peers.
 	//
-	// Because non-allowlisted peers never reach receiveMessages, GetPeers() never
-	// learns their self-reported Name and reports the placeholder "unknown" for
-	// it indefinitely, even though the peer is otherwise connected and tracked
-	// normally.
+	// Because non-allowlisted peers never reach receiveMessages, they are never
+	// recorded as topic peers: while filtered they do not appear in GetPeers()
+	// output at all, even though they remain connected, and no peer-address
+	// discovery is attempted for them either.
 	//
 	// When non-empty, the set is augmented with this node's own peer ID (this is
 	// required: locally published messages pass through the same validators) and
-	// with the peer IDs of StaticPeers. BootstrapPeers are NOT implicitly
-	// allowed; list them here explicitly if they publish.
+	// with the peer IDs of those StaticPeers whose ID is known at startup - i.e.
+	// the entry names it via a /p2p/ component, or its /dnsaddr/ resolved. A
+	// bare /dnsaddr/ entry whose DNS lookup fails at startup contributes no ID
+	// and is warned about; the set is not rebuilt later, so prefer the
+	// /dnsaddr/<host>/p2p/<id> form when this allowlist is in use. For a relayed
+	// address the ID taken is the target's, never the relay's.
+	//
+	// BootstrapPeers are NOT implicitly allowed; list them here explicitly if
+	// they publish.
 	//
 	// Example: []string{"12D3KooWA...", "12D3KooWB..."}
-	AllowedPeerIDs []string
+	AllowedPublisherIDs []string
 
 	// DHTMode specifies how this node participates in the DHT.
 	// Valid values: "server", "client", "off"

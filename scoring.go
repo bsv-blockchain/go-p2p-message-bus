@@ -118,8 +118,10 @@ func resolvePeerScoreConfig(config Config) (*pubsub.PeerScoreParams, *pubsub.Pee
 // score-inspection callback. It warns when the mesh is left in the
 // spec-violating state of peer exchange on with no scoring.
 //
-// allowlist may be nil, which means no restriction.
-func buildPubSubOptions(config Config, allowlist *peerAllowlist, log logger) ([]pubsub.Option, error) {
+// allowlist may be nil, which means no restriction. staticPeers must be the
+// already-parsed result of parsePeerMultiaddrs(config.StaticPeers, log), which
+// is passed on to directPeers rather than resolved again - see there.
+func buildPubSubOptions(config Config, allowlist *peerAllowlist, staticPeers []peer.AddrInfo, log logger) ([]pubsub.Option, error) {
 	var opts []pubsub.Option
 
 	// Reject messages authored outside the allowlist before they are delivered
@@ -171,7 +173,7 @@ func buildPubSubOptions(config Config, allowlist *peerAllowlist, log logger) ([]
 
 		// Exempt trusted peers from scoring: direct peers bypass the mesh score checks
 		// entirely, so a graylisted score can never eclipse a static or bootstrap link.
-		if direct := directPeers(config, log); len(direct) > 0 {
+		if direct := directPeers(config, staticPeers, log); len(direct) > 0 {
 			opts = append(opts, pubsub.WithDirectPeers(direct))
 			log.Infof("GossipSub scoring: %d trusted peer(s) exempt as direct peers", len(direct))
 		}
@@ -196,11 +198,22 @@ func buildPubSubOptions(config Config, allowlist *peerAllowlist, log logger) ([]
 // directPeers is the deduplicated set of StaticPeers and explicitly-configured
 // BootstrapPeers, used as GossipSub direct peers. Default IPFS bootstrap peers (used
 // when BootstrapPeers is empty) are intentionally excluded - they are not trusted.
-func directPeers(config Config, log logger) []peer.AddrInfo {
+//
+// staticPeers is the caller's already-parsed config.StaticPeers. It is not
+// re-resolved here: a second resolution can disagree with the first, and the
+// first is what the dialer and the publisher allowlist both used. Diverging
+// would graft a permanent, scoring-exempt direct link to a peer whose messages
+// this node then drops. Only the static half is deduplicated this way;
+// BootstrapPeers are still parsed here, as nothing else has done so.
+func directPeers(config Config, staticPeers []peer.AddrInfo, log logger) []peer.AddrInfo {
 	seen := make(map[peer.ID]struct{})
 
+	combined := make([]peer.AddrInfo, 0, len(staticPeers))
+	combined = append(combined, staticPeers...)
+	combined = append(combined, parsePeerMultiaddrs(config.BootstrapPeers, log)...)
+
 	var out []peer.AddrInfo
-	for _, ai := range append(parsePeerMultiaddrs(config.StaticPeers, log), parsePeerMultiaddrs(config.BootstrapPeers, log)...) {
+	for _, ai := range combined {
 		if _, ok := seen[ai.ID]; ok {
 			continue
 		}
