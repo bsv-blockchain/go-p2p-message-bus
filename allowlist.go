@@ -35,6 +35,9 @@ type peerAllowlist struct {
 // and the default list is public infrastructure.
 func newPeerAllowlist(config Config, selfID peer.ID, staticPeers []peer.AddrInfo, log logger) (*peerAllowlist, error) {
 	if len(config.AllowedPublisherIDs) == 0 {
+		// The zero-valued drops field is never used here: enabled() is false for
+		// this allowlist (allowed is nil), so scoring.go never registers the
+		// validator that would call recordDrop on it.
 		return &peerAllowlist{}, nil
 	}
 
@@ -148,7 +151,8 @@ func publisherIDFromRawMultiaddr(entry string) peer.ID {
 }
 
 // warnStaticPeersWithoutPublisherID warns about static peers that contributed
-// no ID to the publisher set, whose messages will therefore be dropped.
+// no ID to the publisher set, when that omission can be attributed to
+// specific entries.
 //
 // unnamed are the entries carrying no /p2p/ component, so their ID is only
 // knowable through resolution; named are the IDs the raw scan did learn.
@@ -168,7 +172,7 @@ func warnStaticPeersWithoutPublisherID(unnamed []string, named map[peer.ID]struc
 		}
 	}
 
-	log.Warnf("Static peer(s) %q contributed no publisher ID (DNS resolution yielded nothing and the entry carries no /p2p/ component); messages from them will be dropped - use the /dnsaddr/<host>/p2p/<id> form when the publisher allowlist is in use",
+	log.Warnf("Static peer(s) %q contributed no publisher ID: the entry does not end in a /p2p/<id> component (for a /dnsaddr/ entry, this usually means its DNS lookup failed at startup) - use the /dnsaddr/<host>/p2p/<id> form when the publisher allowlist is in use",
 		unnamed)
 }
 

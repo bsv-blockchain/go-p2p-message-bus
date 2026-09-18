@@ -137,7 +137,7 @@ type Config struct {
 	// with the peer IDs of those StaticPeers whose ID is known at startup - i.e.
 	// the entry names it via a /p2p/ component, or its /dnsaddr/ resolved. A
 	// bare /dnsaddr/ entry whose DNS lookup fails at startup contributes no ID
-	// and is warned about; the set is not rebuilt later, so prefer the
+	// and is usually warned about; the set is not rebuilt later, so prefer the
 	// /dnsaddr/<host>/p2p/<id> form when this allowlist is in use. For a relayed
 	// address the ID taken is the target's, never the relay's.
 	//
