@@ -73,7 +73,8 @@ type Config struct {
 
 	// BootstrapPeers is an optional list of multiaddr strings for bootstrap servers.
 	// If provided, these peers will be used for DHT bootstrapping and relay/circuit functionality.
-	// If not provided, default IPFS bootstrap peers will be used for bootstrapping and relay.
+	// If not provided, default IPFS bootstrap peers will be used for bootstrapping and relay,
+	// unless DisableDefaultBootstrapPeers is set.
 	//
 	// IMPORTANT: When DHTMode is "off", include ALL known bootstrap servers here for best results.
 	// Topic peer exchange can only establish direct connections to peers whose addresses are
@@ -84,6 +85,12 @@ type Config struct {
 	//   "/dns4/server2.example.com/tcp/9905/p2p/12D3KooW...",
 	// }
 	BootstrapPeers []string
+
+	// DisableDefaultBootstrapPeers stops an empty BootstrapPeers list from falling
+	// back to the public IPFS bootstrap peers. Set it for private or local networks
+	// (e.g. regtest) that must not dial, relay through or join the DHT of the public
+	// IPFS network. Has no effect when BootstrapPeers is non-empty. Default: false.
+	DisableDefaultBootstrapPeers bool
 
 	// StaticPeers is an optional list of multiaddr strings for peers the client
 	// should always be connected to. Unlike BootstrapPeers, static peers are not

@@ -277,26 +277,36 @@ func NewClient(config Config) (Client, error) {
 }
 
 func getBootstrapAndRelayPeers(config Config, clientLogger logger) ([]peer.AddrInfo, []peer.AddrInfo) {
-	// Get bootstrap peers based on environment and configuration
-	var bootstrapPeers []peer.AddrInfo
-
-	if testing.Testing() {
-		// Test mode: empty list for fast, isolated tests
-		bootstrapPeers = []peer.AddrInfo{}
-		clientLogger.Infof("Test mode detected - using no bootstrap peers (isolated mode)")
-	} else if len(config.BootstrapPeers) > 0 {
-		// Custom bootstrap peers provided - use them
-		bootstrapPeers = parsePeerMultiaddrs(config.BootstrapPeers, clientLogger)
-		clientLogger.Infof("Using %d custom bootstrap peer(s)", len(bootstrapPeers))
-	} else {
-		// No custom peers - use default IPFS bootstrap peers
-		bootstrapPeers = dht.GetDefaultBootstrapPeerAddrInfos()
-		clientLogger.Infof("Using %d default IPFS bootstrap peers", len(bootstrapPeers))
-	}
+	bootstrapPeers := selectBootstrapPeers(config, clientLogger, testing.Testing())
 
 	// Use the same bootstrap peers as relay peers
 	clientLogger.Infof("Using bootstrap peers as relay peers")
 	return bootstrapPeers, bootstrapPeers
+}
+
+// selectBootstrapPeers picks the bootstrap peers from the configuration. testMode
+// is split out from testing.Testing() so the non-test paths can be unit tested.
+func selectBootstrapPeers(config Config, clientLogger logger, testMode bool) []peer.AddrInfo {
+	switch {
+	case testMode:
+		// Test mode: empty list for fast, isolated tests
+		clientLogger.Infof("Test mode detected - using no bootstrap peers (isolated mode)")
+		return []peer.AddrInfo{}
+	case len(config.BootstrapPeers) > 0:
+		// Custom bootstrap peers provided - use them
+		bootstrapPeers := parsePeerMultiaddrs(config.BootstrapPeers, clientLogger)
+		clientLogger.Infof("Using %d custom bootstrap peer(s)", len(bootstrapPeers))
+		return bootstrapPeers
+	case config.DisableDefaultBootstrapPeers:
+		// Private network: never fall back to the public IPFS bootstrap peers
+		clientLogger.Infof("No bootstrap peers configured and default IPFS bootstrap peers disabled")
+		return []peer.AddrInfo{}
+	default:
+		// No custom peers - use default IPFS bootstrap peers
+		bootstrapPeers := dht.GetDefaultBootstrapPeerAddrInfos()
+		clientLogger.Infof("Using %d default IPFS bootstrap peers", len(bootstrapPeers))
+		return bootstrapPeers
+	}
 }
 
 // Helper functions for NewClient
