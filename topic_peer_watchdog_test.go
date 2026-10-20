@@ -6,6 +6,7 @@ import (
 
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 const (
@@ -103,4 +104,49 @@ func TestWatchdogTracksTopicsIndependently(t *testing.T) {
 	w.observe(t0.Add(time.Second), wdPeer, wdTopic, true, false)
 	assert.False(t, w.observe(t0.Add(time.Second+wdGrace), wdPeer, "block", true, true))
 	assert.True(t, w.observe(t0.Add(time.Second+wdGrace), wdPeer, wdTopic, true, false))
+}
+
+func TestWatchdogGivesUpAfterRepeatedResetsWithoutRecovery(t *testing.T) {
+	w := newTestWatchdog(false)
+	now := time.Unix(1000, 0)
+
+	w.observe(now, wdPeer, wdTopic, true, true)
+
+	// A peer that left the topic on purpose never comes back: after
+	// maxConsecutiveResets resets with no recovery, stop resetting it.
+	for i := 0; i < maxConsecutiveResets; i++ {
+		w.observe(now, wdPeer, wdTopic, true, false)
+		now = now.Add(wdMinInterval + wdGrace)
+		assert.True(t, w.observe(now, wdPeer, wdTopic, true, false), "reset %d", i+1)
+		w.recordReset(now, wdPeer)
+	}
+
+	w.observe(now, wdPeer, wdTopic, true, false)
+	assert.False(t, w.observe(now.Add(time.Hour), wdPeer, wdTopic, true, false), "must give up")
+
+	// Seeing it in the topic again re-arms the watchdog.
+	now = now.Add(time.Hour)
+	w.observe(now, wdPeer, wdTopic, true, true)
+	w.observe(now, wdPeer, wdTopic, true, false)
+	assert.True(t, w.observe(now.Add(wdGrace), wdPeer, wdTopic, true, false), "re-armed after recovery")
+}
+
+func TestRecoveryPeersUseOnlyExplicitlyConfiguredPeers(t *testing.T) {
+	key, err := GeneratePrivateKey()
+	require.NoError(t, err)
+	id, err := peer.IDFromPrivateKey(key)
+	require.NoError(t, err)
+
+	staticPeers := []peer.AddrInfo{{ID: "static-peer"}}
+
+	// No BootstrapPeers configured: the client falls back to the public IPFS
+	// bootstrap nodes, which never join our topics and must not be watched.
+	got := recoveryPeers(Config{}, staticPeers, &captureLogger{})
+	assert.Equal(t, staticPeers, got)
+
+	cfg := Config{BootstrapPeers: []string{"/ip4/127.0.0.1/tcp/9905/p2p/" + id.String()}}
+	got = recoveryPeers(cfg, staticPeers, &captureLogger{})
+	assert.Len(t, got, 2)
+	assert.Equal(t, id, got[0].ID)
+	assert.Equal(t, staticPeers[0], got[1])
 }

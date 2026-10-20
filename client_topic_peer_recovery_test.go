@@ -233,3 +233,43 @@ func TestTopicPeerRecoveryIgnoresPublishOnlyTopics(t *testing.T) {
 	require.Empty(t, resets, "a healthy peer must not be reset over a topic we only publish to")
 	require.Equal(t, network.Connected, a.host.Network().Connectedness(bID), "node-b must stay connected")
 }
+
+// TestTopicPeerResetKeepsConnection checks that a session reset rebuilds the
+// gossipsub streams without closing the connection. Bootstrap peers double as
+// relays, so closing the connection would drop relay reservations and relayed
+// connections to unrelated peers.
+func TestTopicPeerResetKeepsConnection(t *testing.T) {
+	keyA, err := GeneratePrivateKey()
+	require.NoError(t, err)
+	keyB, err := GeneratePrivateKey()
+	require.NoError(t, err)
+
+	a, _ := startTopicClient(t, "node-a", keyA, nil)
+	t.Cleanup(func() { _ = a.Close() })
+
+	b, bMsgs := startTopicClient(t, "node-b", keyB, []string{loopbackAddr(t, a)})
+	t.Cleanup(func() { _ = b.Close() })
+
+	bID := b.host.ID()
+	require.Eventually(t, func() bool { return topicHasPeer(a, bID) },
+		15*time.Second, 100*time.Millisecond, "node-b should join node-a's topic view")
+
+	connIDs := func() []string {
+		conns := a.host.Network().ConnsToPeer(bID)
+		ids := make([]string, 0, len(conns))
+		for _, conn := range conns {
+			ids = append(ids, conn.ID())
+		}
+		return ids
+	}
+
+	before := connIDs()
+	require.NotEmpty(t, before)
+
+	a.resetPeerSession(context.Background(), peer.AddrInfo{ID: bID}, []string{recoveryTopic})
+
+	require.Eventually(t, func() bool { return topicHasPeer(a, bID) },
+		15*time.Second, 100*time.Millisecond, "node-b should be back in the topic after the reset")
+	require.ElementsMatch(t, before, connIDs(), "the reset must keep the existing connection")
+	require.True(t, receives(t, a, bMsgs, 10*time.Second), "messages must flow after the reset")
+}

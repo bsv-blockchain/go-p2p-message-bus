@@ -3,19 +3,24 @@ package p2p
 import (
 	"context"
 	"slices"
+	"strings"
 	"time"
 
+	pubsub "github.com/libp2p/go-libp2p-pubsub"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/libp2p/go-libp2p/core/protocol"
 )
 
 const (
 	defaultTopicPeerRecoveryGrace       = 30 * time.Second
 	defaultTopicPeerRecoveryMinInterval = 2 * time.Minute
 	topicPeerCheckInterval              = 5 * time.Second
-	// topicPeerRedialDelay gives both sides time to tear the old session down
-	// before we dial again.
-	topicPeerRedialDelay = time.Second
+	// maxConsecutiveResets is how many resets a peer gets without reappearing in
+	// any watched topic before the watchdog stops resetting it. A peer that left
+	// a topic on purpose is not reset forever; seeing it in a topic again
+	// re-arms the watchdog.
+	maxConsecutiveResets = 3
 )
 
 // topicPeerWatchdog decides when a managed peer that is connected but missing
@@ -29,8 +34,14 @@ const (
 // handling clears ALL topic state for that peer ID, and since the peer is still
 // connected it only respawns its own writer. The surviving session never
 // re-announces its subscriptions, so the peer stays connected but absent from
-// every topic, permanently. Closing the connection makes both sides drop the
-// peer and redo the handshake on reconnect.
+// every topic, permanently. Resetting the gossipsub streams to the peer makes
+// both sides respawn their writers and resend their subscriptions, without
+// touching the connection.
+//
+// Without assumeShared, a peer is only watched on a topic after this process
+// has seen it there, so a process that starts up already facing the stale
+// state cannot recover it; the peer on the other side, which saw it before,
+// does. Set ManagedPeersShareTopics where every managed peer shares our topics.
 //
 // The watchdog holds only the decision state; the caller supplies observations
 // and performs the reset. It is not safe for concurrent use.
@@ -45,6 +56,8 @@ type topicPeerWatchdog struct {
 	seen         map[peer.ID]map[string]bool
 	missingSince map[peer.ID]map[string]time.Time
 	lastReset    map[peer.ID]time.Time
+	// consecutiveResets counts resets since the peer was last seen in a topic.
+	consecutiveResets map[peer.ID]int
 }
 
 func newTopicPeerWatchdog(grace, minResetInterval time.Duration, assumeShared bool) *topicPeerWatchdog {
@@ -55,6 +68,8 @@ func newTopicPeerWatchdog(grace, minResetInterval time.Duration, assumeShared bo
 		seen:             make(map[peer.ID]map[string]bool),
 		missingSince:     make(map[peer.ID]map[string]time.Time),
 		lastReset:        make(map[peer.ID]time.Time),
+
+		consecutiveResets: make(map[peer.ID]int),
 	}
 }
 
@@ -68,6 +83,7 @@ func (w *topicPeerWatchdog) observe(now time.Time, id peer.ID, topic string, con
 
 		w.seen[id][topic] = true
 		delete(w.missingSince[id], topic)
+		delete(w.consecutiveResets, id)
 
 		return false
 	}
@@ -80,6 +96,10 @@ func (w *topicPeerWatchdog) observe(now time.Time, id peer.ID, topic string, con
 	}
 
 	if !w.assumeShared && !w.seen[id][topic] {
+		return false
+	}
+
+	if w.consecutiveResets[id] >= maxConsecutiveResets {
 		return false
 	}
 
@@ -113,6 +133,7 @@ func (w *topicPeerWatchdog) resetTooRecent(now time.Time, id peer.ID) bool {
 // id restart from scratch once it reconnects.
 func (w *topicPeerWatchdog) recordReset(now time.Time, id peer.ID) {
 	w.lastReset[id] = now
+	w.consecutiveResets[id]++
 	delete(w.missingSince, id)
 }
 
@@ -135,6 +156,19 @@ func (c *client) TopicPeers(topic string) []string {
 	}
 
 	return out
+}
+
+// recoveryPeers returns the peers the topic peer watchdog watches: the
+// explicitly configured BootstrapPeers and the static peers. The public IPFS
+// bootstrap nodes used when BootstrapPeers is empty never join our topics and
+// are excluded.
+func recoveryPeers(config Config, staticPeers []peer.AddrInfo, log logger) []peer.AddrInfo {
+	var explicit []peer.AddrInfo
+	if len(config.BootstrapPeers) > 0 {
+		explicit = parsePeerMultiaddrs(config.BootstrapPeers, log)
+	}
+
+	return append(explicit, staticPeers...)
 }
 
 // monitorTopicPeers runs the topic peer watchdog over the managed peers for the
@@ -177,14 +211,21 @@ func (c *client) checkTopicPeers(ctx context.Context, w *topicPeerWatchdog, mana
 	// Only topics we subscribe to count. Publish joins a topic without
 	// subscribing, and a managed peer is never "missing" from a topic we only
 	// publish to.
+	// ListPeers round-trips through the pubsub event loop, so collect the topic
+	// handles under the lock and query them after releasing it.
 	c.mu.RLock()
-	topicPeers := make(map[string][]peer.ID, len(c.subs))
+	watched := make(map[string]*pubsub.Topic, len(c.subs))
 	for name := range c.subs {
 		if t, ok := c.topics[name]; ok {
-			topicPeers[name] = t.ListPeers()
+			watched[name] = t
 		}
 	}
 	c.mu.RUnlock()
+
+	topicPeers := make(map[string][]peer.ID, len(watched))
+	for name, t := range watched {
+		topicPeers[name] = t.ListPeers()
+	}
 
 	for _, pi := range managed {
 		if pi.ID == c.host.ID() {
@@ -211,28 +252,35 @@ func (c *client) checkTopicPeers(ctx context.Context, w *topicPeerWatchdog, mana
 	}
 }
 
-// resetPeerSession closes every connection to pi and dials it again.
-func (c *client) resetPeerSession(ctx context.Context, pi peer.AddrInfo, topics []string) {
-	c.logger.Warnf("Managed peer %s [%s] connected but missing from topics %v; resetting connection to rebuild its gossipsub session",
+// resetPeerSession resets the gossipsub streams to pi without closing the
+// connection: bootstrap peers double as relays, and closing the connection
+// would drop relay reservations and relayed connections to unrelated peers.
+// Resetting our outbound stream makes pubsub respawn its writer and resend our
+// subscriptions; resetting the inbound one makes the remote do the same, so
+// it re-announces its subscriptions to us.
+func (c *client) resetPeerSession(_ context.Context, pi peer.AddrInfo, topics []string) {
+	c.logger.Warnf("Managed peer %s [%s] connected but missing from topics %v; resetting its gossipsub streams",
 		pi.ID.String(), c.peerTracker.getName(pi.ID), topics)
 
-	if err := c.host.Network().ClosePeer(pi.ID); err != nil {
-		c.logger.Warnf("Failed to close connection to peer %s: %v", pi.ID.String(), err)
+	reset := 0
+
+	for _, conn := range c.host.Network().ConnsToPeer(pi.ID) {
+		for _, s := range conn.GetStreams() {
+			if isPubSubProtocol(s.Protocol()) {
+				_ = s.Reset()
+				reset++
+			}
+		}
 	}
+
+	c.logger.Debugf("Reset %d gossipsub stream(s) to peer %s", reset, pi.ID.String())
 
 	if cb := c.config.OnTopicPeerReset; cb != nil {
 		cb(pi.ID.String(), topics)
 	}
+}
 
-	go func() {
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(topicPeerRedialDelay):
-		}
-
-		if err := c.host.Connect(ctx, pi); err != nil {
-			c.logger.Debugf("Redial of peer %s after session reset failed (its own reconnect loop may still reach us): %v", pi.ID.String(), err)
-		}
-	}()
+// isPubSubProtocol reports whether proto is a gossipsub or floodsub protocol.
+func isPubSubProtocol(proto protocol.ID) bool {
+	return strings.HasPrefix(string(proto), "/meshsub/") || strings.HasPrefix(string(proto), "/floodsub/")
 }
