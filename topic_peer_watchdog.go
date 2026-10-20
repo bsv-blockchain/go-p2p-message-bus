@@ -174,10 +174,15 @@ func (c *client) monitorTopicPeers(ctx context.Context, managed []peer.AddrInfo)
 // checkTopicPeers feeds one round of observations to w and resets every peer
 // it flags.
 func (c *client) checkTopicPeers(ctx context.Context, w *topicPeerWatchdog, managed []peer.AddrInfo, now time.Time) {
+	// Only topics we subscribe to count. Publish joins a topic without
+	// subscribing, and a managed peer is never "missing" from a topic we only
+	// publish to.
 	c.mu.RLock()
-	topicPeers := make(map[string][]peer.ID, len(c.topics))
-	for name, t := range c.topics {
-		topicPeers[name] = t.ListPeers()
+	topicPeers := make(map[string][]peer.ID, len(c.subs))
+	for name := range c.subs {
+		if t, ok := c.topics[name]; ok {
+			topicPeers[name] = t.ListPeers()
+		}
 	}
 	c.mu.RUnlock()
 

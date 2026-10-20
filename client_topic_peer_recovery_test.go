@@ -174,3 +174,62 @@ func TestTopicPeerRecoversAfterOverlappingRestarts(t *testing.T) {
 	require.True(t, receives(t, a, bMsgs, 30*time.Second),
 		"after overlapping restarts node-a's messages must reach node-b again")
 }
+
+// TestTopicPeerRecoveryIgnoresPublishOnlyTopics checks that the watchdog only
+// judges topics this client subscribes to. Publish joins a topic without
+// subscribing, so a healthy managed peer is never a member of it from our
+// point of view; treating it as missing would disconnect the peer every
+// minimum interval even with ManagedPeersShareTopics set.
+func TestTopicPeerRecoveryIgnoresPublishOnlyTopics(t *testing.T) {
+	const publishOnlyTopic = "publish-only-topic"
+
+	keyA, err := GeneratePrivateKey()
+	require.NoError(t, err)
+	keyB, err := GeneratePrivateKey()
+	require.NoError(t, err)
+
+	bID, err := peer.IDFromPrivateKey(keyB)
+	require.NoError(t, err)
+
+	bPort := freePort(t)
+	bAddr := fmt.Sprintf("/ip4/127.0.0.1/tcp/%d/p2p/%s", bPort, bID)
+
+	var resets []string
+
+	// The background watchdog is off so the test drives the rounds itself; the
+	// reset callback still records anything resetPeerSession does.
+	clA, err := NewClient(Config{
+		Name:                     "node-a",
+		PrivateKey:               keyA,
+		AllowPrivateIPs:          true,
+		StaticPeers:              []string{bAddr},
+		Logger:                   &captureLogger{},
+		DisableTopicPeerRecovery: true,
+		ManagedPeersShareTopics:  true,
+		OnTopicPeerReset:         func(id string, topics []string) { resets = append(resets, fmt.Sprintf("%s %v", id, topics)) },
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = clA.Close() })
+
+	a := clA.(*client)
+	a.Subscribe(recoveryTopic)
+
+	b, _ := startTopicClientOnPort(t, "node-b", keyB, bPort, []string{loopbackAddr(t, a)})
+	t.Cleanup(func() { _ = b.Close() })
+
+	require.Eventually(t, func() bool { return topicHasPeer(a, bID) },
+		15*time.Second, 100*time.Millisecond, "node-b should join node-a's topic view")
+
+	// Publishing joins the topic locally without subscribing to it.
+	require.NoError(t, a.Publish(context.Background(), publishOnlyTopic, []byte("hello")))
+
+	managed := []peer.AddrInfo{{ID: bID}}
+	w := newTopicPeerWatchdog(time.Second, time.Minute, true)
+	now := time.Now()
+
+	a.checkTopicPeers(context.Background(), w, managed, now)
+	a.checkTopicPeers(context.Background(), w, managed, now.Add(2*time.Second))
+
+	require.Empty(t, resets, "a healthy peer must not be reset over a topic we only publish to")
+	require.Equal(t, network.Connected, a.host.Network().Connectedness(bID), "node-b must stay connected")
+}
