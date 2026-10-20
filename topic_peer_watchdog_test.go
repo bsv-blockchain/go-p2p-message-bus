@@ -5,7 +5,9 @@ import (
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/multiformats/go-multiaddr"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 const (
@@ -112,10 +114,11 @@ func TestWatchdogGivesUpAfterRepeatedResetsWithoutRecovery(t *testing.T) {
 	w.observe(now, wdPeer, wdTopic, true, true)
 
 	// A peer that left the topic on purpose never comes back: after
-	// maxConsecutiveResets resets with no recovery, stop resetting it.
+	// maxConsecutiveResets resets with no recovery, stop resetting it. Resets
+	// are spaced past the per-peer window so only the give-up is exercised.
 	for i := 0; i < maxConsecutiveResets; i++ {
 		w.observe(now, wdPeer, wdTopic, true, false)
-		now = now.Add(wdMinInterval + wdGrace)
+		now = now.Add(resetWindow + wdGrace)
 		assert.True(t, w.observe(now, wdPeer, wdTopic, true, false), "reset %d", i+1)
 		w.recordReset(now, wdPeer, []string{wdTopic})
 	}
@@ -175,4 +178,124 @@ func TestWatchdogHealthyTopicDoesNotRearmResetsForLeftTopic(t *testing.T) {
 	}
 
 	assert.Equal(t, maxConsecutiveResets, resets)
+}
+
+func TestWatchdogCapsResetsPerPeerWithinWindow(t *testing.T) {
+	w := newTestWatchdog(false)
+	now := time.Unix(1000, 0)
+
+	// A peer that flaps in and out of a topic would otherwise be reset every
+	// minimum interval. Each reset also costs the remote one of pubsub's four
+	// writer respawns per sliding window, so cap resets per peer and keep the
+	// cap when the peer reappears.
+	resets := 0
+	for i := 0; i < 4; i++ {
+		w.observe(now, wdPeer, wdTopic, true, true)
+		w.observe(now, wdPeer, wdTopic, true, false)
+		now = now.Add(wdMinInterval + wdGrace)
+		if w.observe(now, wdPeer, wdTopic, true, false) {
+			w.recordReset(now, wdPeer, []string{wdTopic})
+			resets++
+		}
+	}
+	assert.Equal(t, maxResetsPerWindow, resets, "resets within one window")
+
+	// Once the window has slid past the earlier resets, recovery is allowed again.
+	now = now.Add(resetWindow)
+	w.observe(now, wdPeer, wdTopic, true, true)
+	w.observe(now, wdPeer, wdTopic, true, false)
+	assert.True(t, w.observe(now.Add(wdGrace), wdPeer, wdTopic, true, false))
+}
+
+func TestWatchdogDisconnectRearmsGivenUpTopic(t *testing.T) {
+	w := newTestWatchdog(false)
+	now := time.Unix(1000, 0)
+
+	w.observe(now, wdPeer, wdTopic, true, true)
+
+	// Exhaust the per-topic give-up, spacing resets past the window cap.
+	for i := 0; i < maxConsecutiveResets; i++ {
+		w.observe(now, wdPeer, wdTopic, true, false)
+		now = now.Add(resetWindow + wdGrace)
+		assert.True(t, w.observe(now, wdPeer, wdTopic, true, false), "reset %d", i+1)
+		w.recordReset(now, wdPeer, []string{wdTopic})
+	}
+
+	// The disconnect caused by our own last reset does not re-arm the topic.
+	w.observe(now.Add(time.Second), wdPeer, wdTopic, false, false)
+
+	w.observe(now, wdPeer, wdTopic, true, false)
+	now = now.Add(resetWindow + wdGrace)
+	assert.False(t, w.observe(now, wdPeer, wdTopic, true, false), "given up")
+
+	// A disconnect ends that session; the next connection is a new one and a
+	// later stale state must be repairable even if the peer was not seen in the
+	// topic in between.
+	w.observe(now, wdPeer, wdTopic, false, false)
+	now = now.Add(resetWindow)
+	w.observe(now, wdPeer, wdTopic, true, false)
+	assert.True(t, w.observe(now.Add(wdGrace), wdPeer, wdTopic, true, false), "re-armed by reconnect")
+}
+
+func TestRelayInUseDetectsCircuitThroughPeer(t *testing.T) {
+	ma := func(s string) multiaddr.Multiaddr {
+		m, err := multiaddr.NewMultiaddr(s)
+		require.NoError(t, err)
+		return m
+	}
+
+	relayKey, err := GeneratePrivateKey()
+	require.NoError(t, err)
+	relayID, err := peer.IDFromPrivateKey(relayKey)
+	require.NoError(t, err)
+
+	otherKey, err := GeneratePrivateKey()
+	require.NoError(t, err)
+	otherID, err := peer.IDFromPrivateKey(otherKey)
+	require.NoError(t, err)
+
+	direct := ma("/ip4/10.0.0.1/tcp/9905")
+	ourCircuit := ma("/ip4/10.0.0.2/tcp/9905/p2p/" + relayID.String() + "/p2p-circuit")
+	relayedConn := ma("/ip4/10.0.0.2/tcp/9905/p2p/" + relayID.String() + "/p2p-circuit/p2p/" + otherID.String())
+
+	assert.False(t, relayInUse(relayID, []multiaddr.Multiaddr{direct}, []multiaddr.Multiaddr{direct}), "plain direct peer")
+	assert.True(t, relayInUse(relayID, []multiaddr.Multiaddr{direct, ourCircuit}, nil), "we listen via a reservation on it")
+	assert.True(t, relayInUse(relayID, nil, []multiaddr.Multiaddr{relayedConn}), "a connection is relayed through it")
+	assert.False(t, relayInUse(otherID, []multiaddr.Multiaddr{ourCircuit}, []multiaddr.Multiaddr{relayedConn}), "relayed peer is not the relay")
+}
+
+func TestRecoveryPeersDeduplicatesByID(t *testing.T) {
+	a1 := multiaddr.StringCast("/ip4/10.0.0.1/tcp/9905")
+	a2 := multiaddr.StringCast("/ip4/10.0.0.1/udp/9905/quic-v1")
+	a3 := multiaddr.StringCast("/ip4/10.0.0.9/tcp/9905")
+
+	bootstrap := []peer.AddrInfo{{ID: "peer-a", Addrs: []multiaddr.Multiaddr{a1}}, {ID: "peer-a", Addrs: []multiaddr.Multiaddr{a2}}}
+	static := []peer.AddrInfo{{ID: "peer-a", Addrs: []multiaddr.Multiaddr{a1}}, {ID: "peer-b", Addrs: []multiaddr.Multiaddr{a3}}}
+
+	got := recoveryPeers(Config{BootstrapPeers: []string{"x"}}, bootstrap, static)
+	assert.Len(t, got, 2)
+	assert.Equal(t, peer.ID("peer-a"), got[0].ID)
+	assert.ElementsMatch(t, []multiaddr.Multiaddr{a1, a2}, got[0].Addrs)
+	assert.Equal(t, peer.ID("peer-b"), got[1].ID)
+}
+
+func TestWriterRepairBackoff(t *testing.T) {
+	b := newWriterRepairBackoff()
+	now := time.Unix(1000, 0)
+
+	assert.True(t, b.allow(now, wdPeer), "first repair goes immediately")
+	b.record(now, wdPeer)
+
+	assert.False(t, b.allow(now.Add(writerRepairInitialDelay-time.Millisecond), wdPeer))
+	assert.True(t, b.allow(now.Add(writerRepairInitialDelay), wdPeer))
+	b.record(now.Add(writerRepairInitialDelay), wdPeer)
+
+	// The delay doubles while the writer stays missing.
+	next := now.Add(writerRepairInitialDelay)
+	assert.False(t, b.allow(next.Add(2*writerRepairInitialDelay-time.Millisecond), wdPeer))
+	assert.True(t, b.allow(next.Add(2*writerRepairInitialDelay), wdPeer))
+
+	// A healthy writer clears the backoff.
+	b.clear(wdPeer)
+	assert.True(t, b.allow(next, wdPeer))
 }

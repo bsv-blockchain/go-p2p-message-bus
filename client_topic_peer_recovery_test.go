@@ -3,7 +3,6 @@ package p2p
 import (
 	"context"
 	"fmt"
-	"net"
 	"testing"
 	"time"
 
@@ -16,15 +15,10 @@ import (
 const recoveryTopic = "recovery-topic"
 
 // startTopicClient starts a client with the given key, subscribed to
-// recoveryTopic, with staticPeers as its managed peers. The caller owns Close.
+// recoveryTopic, with staticPeers as its managed peers. Close is registered as
+// a test cleanup straight away, so a failing assertion never leaks the client;
+// Close is idempotent, so tests may also close it earlier.
 func startTopicClient(t *testing.T, name string, key crypto.PrivKey, staticPeers []string) (*client, <-chan Message) {
-	t.Helper()
-
-	return startTopicClientOnPort(t, name, key, 0, staticPeers)
-}
-
-// startTopicClientOnPort is startTopicClient listening on a fixed port.
-func startTopicClientOnPort(t *testing.T, name string, key crypto.PrivKey, port int, staticPeers []string) (*client, <-chan Message) {
 	t.Helper()
 
 	logs := &captureLogger{}
@@ -32,7 +26,6 @@ func startTopicClientOnPort(t *testing.T, name string, key crypto.PrivKey, port 
 	cl, err := NewClient(Config{
 		Name:            name,
 		PrivateKey:      key,
-		Port:            port,
 		AllowPrivateIPs: true,
 		StaticPeers:     staticPeers,
 		Logger:          logs,
@@ -40,6 +33,8 @@ func startTopicClientOnPort(t *testing.T, name string, key crypto.PrivKey, port 
 	require.NoError(t, err)
 
 	t.Cleanup(func() {
+		_ = cl.Close()
+
 		if t.Failed() {
 			t.Logf("--- %s logs ---\n%s", name, logs.String())
 		}
@@ -48,19 +43,6 @@ func startTopicClientOnPort(t *testing.T, name string, key crypto.PrivKey, port 
 	c := cl.(*client)
 
 	return c, c.Subscribe(recoveryTopic)
-}
-
-// freePort returns a TCP port that was free a moment ago.
-func freePort(t *testing.T) int {
-	t.Helper()
-
-	l, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-
-	port := l.Addr().(*net.TCPAddr).Port
-	require.NoError(t, l.Close())
-
-	return port
 }
 
 // topicHasPeer reports whether from's view of recoveryTopic includes id.
@@ -97,7 +79,10 @@ func receives(t *testing.T, pub *client, ch <-chan Message, wait time.Duration) 
 
 		select {
 		case msg, ok := <-ch:
-			if ok && string(msg.Data) == string(payload) {
+			if !ok {
+				return false
+			}
+			if string(msg.Data) == string(payload) {
 				return true
 			}
 		case <-tick.C:
@@ -107,14 +92,38 @@ func receives(t *testing.T, pub *client, ch <-chan Message, wait time.Duration) 
 	}
 }
 
+// connIDs returns the IDs of from's connections to id.
+func connIDs(from *client, id peer.ID) []string {
+	conns := from.host.Network().ConnsToPeer(id)
+	ids := make([]string, 0, len(conns))
+
+	for _, conn := range conns {
+		ids = append(ids, conn.ID())
+	}
+
+	return ids
+}
+
+// waitFor polls cond until it holds or timeout elapses.
+func waitFor(timeout time.Duration, cond func() bool) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return true
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	return cond()
+}
+
 // TestTopicPeerRecoversAfterOverlappingRestarts reproduces a rolling update of
 // a node whose identity is fixed: a new process with the same private key
 // starts and connects while the old one is still alive, then the old one
-// exits. Repeated a few times in quick succession, as a deployment rollout plus
-// the managed-peer reconnect loop can do, this leaves the long-lived peer with
-// a live connection to the node but no gossipsub session: the node never
-// reappears in the topic and messages stop flowing, with nothing on either side
-// that recovers it. The client must notice and re-establish the session.
+// exits. This leaves the long-lived peer with a live connection to the node but
+// no gossipsub session: the node never reappears in the topic and messages stop
+// flowing, with nothing on either side that recovers it. The client must notice
+// and re-establish the session.
 func TestTopicPeerRecoversAfterOverlappingRestarts(t *testing.T) {
 	if testing.Short() {
 		t.Skip("multi-process restart scenario takes tens of seconds; skip in -short")
@@ -125,21 +134,15 @@ func TestTopicPeerRecoversAfterOverlappingRestarts(t *testing.T) {
 	keyB, err := GeneratePrivateKey()
 	require.NoError(t, err)
 
-	// As in a teranode deployment, each node lists the other as a managed peer
-	// by stable peer ID. node-b's first process listens on a known port so
-	// node-a's entry can be written before either starts; later node-b
-	// processes come up on other ports (a new pod gets a new IP) and dial in.
-	bID, err := peer.IDFromPrivateKey(keyB)
-	require.NoError(t, err)
+	// As in a teranode deployment, node-a lists node-b as a managed peer by
+	// stable peer ID. node-b's first process starts first so node-a can be given
+	// its real address; later node-b processes come up elsewhere (a new pod gets
+	// a new IP) and dial in.
+	b, bMsgs := startTopicClient(t, "node-b", keyB, nil)
+	bID := b.host.ID()
 
-	bPort := freePort(t)
-
-	a, _ := startTopicClient(t, "node-a", keyA, []string{fmt.Sprintf("/ip4/127.0.0.1/tcp/%d/p2p/%s", bPort, bID)})
-	t.Cleanup(func() { _ = a.Close() })
-
+	a, _ := startTopicClient(t, "node-a", keyA, []string{loopbackAddr(t, b)})
 	aAddr := loopbackAddr(t, a)
-
-	b, bMsgs := startTopicClientOnPort(t, "node-b", keyB, bPort, []string{aAddr})
 
 	require.Eventually(t, func() bool { return topicHasPeer(a, bID) },
 		15*time.Second, 100*time.Millisecond, "node-b should join node-a's topic view")
@@ -166,8 +169,6 @@ func TestTopicPeerRecoversAfterOverlappingRestarts(t *testing.T) {
 		b, bMsgs = next, nextMsgs
 	}
 
-	t.Cleanup(func() { _ = b.Close() })
-
 	require.Eventually(t, func() bool { return topicHasPeer(a, bID) },
 		90*time.Second, 250*time.Millisecond,
 		"after overlapping restarts node-a must see node-b in the topic again")
@@ -178,8 +179,8 @@ func TestTopicPeerRecoversAfterOverlappingRestarts(t *testing.T) {
 // TestTopicPeerRecoveryIgnoresPublishOnlyTopics checks that the watchdog only
 // judges topics this client subscribes to. Publish joins a topic without
 // subscribing, so a healthy managed peer is never a member of it from our
-// point of view; treating it as missing would disconnect the peer every
-// minimum interval even with ManagedPeersShareTopics set.
+// point of view; treating it as missing would reset the peer every minimum
+// interval even with ManagedPeersShareTopics set.
 func TestTopicPeerRecoveryIgnoresPublishOnlyTopics(t *testing.T) {
 	const publishOnlyTopic = "publish-only-topic"
 
@@ -188,11 +189,8 @@ func TestTopicPeerRecoveryIgnoresPublishOnlyTopics(t *testing.T) {
 	keyB, err := GeneratePrivateKey()
 	require.NoError(t, err)
 
-	bID, err := peer.IDFromPrivateKey(keyB)
-	require.NoError(t, err)
-
-	bPort := freePort(t)
-	bAddr := fmt.Sprintf("/ip4/127.0.0.1/tcp/%d/p2p/%s", bPort, bID)
+	b, _ := startTopicClient(t, "node-b", keyB, nil)
+	bID := b.host.ID()
 
 	var resets []string
 
@@ -202,7 +200,7 @@ func TestTopicPeerRecoveryIgnoresPublishOnlyTopics(t *testing.T) {
 		Name:                     "node-a",
 		PrivateKey:               keyA,
 		AllowPrivateIPs:          true,
-		StaticPeers:              []string{bAddr},
+		StaticPeers:              []string{loopbackAddr(t, b)},
 		Logger:                   &captureLogger{},
 		DisableTopicPeerRecovery: true,
 		ManagedPeersShareTopics:  true,
@@ -214,9 +212,6 @@ func TestTopicPeerRecoveryIgnoresPublishOnlyTopics(t *testing.T) {
 	a := clA.(*client)
 	a.Subscribe(recoveryTopic)
 
-	b, _ := startTopicClientOnPort(t, "node-b", keyB, bPort, []string{loopbackAddr(t, a)})
-	t.Cleanup(func() { _ = b.Close() })
-
 	require.Eventually(t, func() bool { return topicHasPeer(a, bID) },
 		15*time.Second, 100*time.Millisecond, "node-b should join node-a's topic view")
 
@@ -227,50 +222,83 @@ func TestTopicPeerRecoveryIgnoresPublishOnlyTopics(t *testing.T) {
 	w := newTopicPeerWatchdog(time.Second, time.Minute, true)
 	now := time.Now()
 
-	a.checkTopicPeers(context.Background(), w, managed, now)
-	a.checkTopicPeers(context.Background(), w, managed, now.Add(2*time.Second))
+	a.checkTopicPeers(w, managed, now)
+	a.checkTopicPeers(w, managed, now.Add(2*time.Second))
 
 	require.Empty(t, resets, "a healthy peer must not be reset over a topic we only publish to")
 	require.Equal(t, network.Connected, a.host.Network().Connectedness(bID), "node-b must stay connected")
 }
 
-// TestTopicPeerResetKeepsConnection checks that a session reset rebuilds the
-// gossipsub streams without closing the connection. Bootstrap peers double as
-// relays, so closing the connection would drop relay reservations and relayed
-// connections to unrelated peers.
-func TestTopicPeerResetKeepsConnection(t *testing.T) {
+// TestTopicPeerResetRecoversRemoteThatDoesNotManageUs covers the remote side of
+// a reset. Every stream reset also kills the remote's writer to us, which costs
+// the remote one of pubsub's four writer respawns per sliding window, and only
+// a remote that runs this watchdog with us as a managed peer can repair its own
+// writer. A peer that does not relay for us is therefore reset by closing the
+// connection, which the remote does not count against that budget, and redialed.
+func TestTopicPeerResetRecoversRemoteThatDoesNotManageUs(t *testing.T) {
+	keyA, err := GeneratePrivateKey()
+	require.NoError(t, err)
+	keyB, err := GeneratePrivateKey()
+	require.NoError(t, err)
+
+	// node-b has no managed peers, so it never repairs anything itself.
+	b, bMsgs := startTopicClient(t, "node-b", keyB, nil)
+	bID := b.host.ID()
+
+	a, aMsgs := startTopicClient(t, "node-a", keyA, []string{loopbackAddr(t, b)})
+	aID := a.host.ID()
+
+	pi := peer.AddrInfo{ID: bID, Addrs: b.host.Addrs()}
+
+	require.Eventually(t, func() bool { return topicHasPeer(a, bID) && topicHasPeer(b, aID) },
+		15*time.Second, 100*time.Millisecond, "nodes should see each other in the topic")
+
+	healthy := func() bool {
+		return topicHasPeer(a, bID) && topicHasPeer(b, aID) &&
+			a.hasOutboundPubSubStream(bID) && b.hasOutboundPubSubStream(aID)
+	}
+
+	// More resets than pubsub's per-window writer respawn budget (four). Each
+	// reset waits for both writers to be back first, so every reset really
+	// kills node-b's writer to node-a.
+	for i := 0; i < 5; i++ {
+		require.Eventually(t, healthy, 20*time.Second, 100*time.Millisecond,
+			"before reset %d: both nodes should have a writer and see each other", i+1)
+
+		a.resetPeerSession(pi, []string{recoveryTopic})
+	}
+
+	require.Eventually(t, healthy, 20*time.Second, 100*time.Millisecond,
+		"after the resets both nodes must have a writer and see each other again")
+
+	require.True(t, receives(t, b, aMsgs, 15*time.Second), "node-b's messages must still reach node-a")
+	require.True(t, receives(t, a, bMsgs, 15*time.Second), "node-a's messages must still reach node-b")
+}
+
+// TestResetPeerStreamsKeepsConnection checks the stream-only reset used for a
+// peer that relays for us: it rebuilds the gossipsub streams without closing
+// the connection, so relay reservations and relayed connections survive.
+func TestResetPeerStreamsKeepsConnection(t *testing.T) {
 	keyA, err := GeneratePrivateKey()
 	require.NoError(t, err)
 	keyB, err := GeneratePrivateKey()
 	require.NoError(t, err)
 
 	a, _ := startTopicClient(t, "node-a", keyA, nil)
-	t.Cleanup(func() { _ = a.Close() })
-
 	b, bMsgs := startTopicClient(t, "node-b", keyB, []string{loopbackAddr(t, a)})
-	t.Cleanup(func() { _ = b.Close() })
-
 	bID := b.host.ID()
-	require.Eventually(t, func() bool { return topicHasPeer(a, bID) },
+
+	require.Eventually(t, func() bool { return topicHasPeer(a, bID) && a.hasOutboundPubSubStream(bID) },
 		15*time.Second, 100*time.Millisecond, "node-b should join node-a's topic view")
 
-	connIDs := func() []string {
-		conns := a.host.Network().ConnsToPeer(bID)
-		ids := make([]string, 0, len(conns))
-		for _, conn := range conns {
-			ids = append(ids, conn.ID())
-		}
-		return ids
-	}
-
-	before := connIDs()
+	before := connIDs(a, bID)
 	require.NotEmpty(t, before)
 
-	a.resetPeerSession(context.Background(), peer.AddrInfo{ID: bID}, []string{recoveryTopic})
+	require.Positive(t, a.resetPeerStreams(bID), "the reset must reset at least one gossipsub stream")
 
 	require.Eventually(t, func() bool { return topicHasPeer(a, bID) },
 		15*time.Second, 100*time.Millisecond, "node-b should be back in the topic after the reset")
-	require.ElementsMatch(t, before, connIDs(), "the reset must keep the existing connection")
+	require.ElementsMatch(t, before, connIDs(a, bID), "the reset must keep the existing connection")
 	require.True(t, receives(t, a, bMsgs, 10*time.Second), "messages must flow after the reset")
 }
 
@@ -287,51 +315,26 @@ func TestTopicPeerRecoveryRebuildsExhaustedWriter(t *testing.T) {
 	require.NoError(t, err)
 
 	a, _ := startTopicClient(t, "node-a", keyA, nil)
-	t.Cleanup(func() { _ = a.Close() })
-
 	b, bMsgs := startTopicClient(t, "node-b", keyB, []string{loopbackAddr(t, a)})
-	t.Cleanup(func() { _ = b.Close() })
-
 	bID := b.host.ID()
+
 	require.Eventually(t, func() bool { return topicHasPeer(a, bID) && a.hasOutboundPubSubStream(bID) },
 		15*time.Second, 100*time.Millisecond, "node-a should have a writer to node-b")
 
-	conns := a.host.Network().ConnsToPeer(bID)
-	before := make([]string, 0, len(conns))
-	for _, conn := range conns {
-		before = append(before, conn.ID())
-	}
+	before := connIDs(a, bID)
 
 	// Exhaust pubsub's writer-respawn budget for node-b.
 	for i := 0; i < 6; i++ {
-		a.resetPeerSession(context.Background(), peer.AddrInfo{ID: bID}, []string{recoveryTopic})
+		a.resetPeerStreams(bID)
 		_ = waitFor(3*time.Second, func() bool { return a.hasOutboundPubSubStream(bID) })
 	}
 
 	// One watchdog round must restore the writer.
 	w := newTopicPeerWatchdog(time.Minute, time.Minute, true)
-	a.checkTopicPeers(context.Background(), w, []peer.AddrInfo{{ID: bID}}, time.Now())
+	a.checkTopicPeers(w, []peer.AddrInfo{{ID: bID}}, time.Now())
 
 	require.Eventually(t, func() bool { return a.hasOutboundPubSubStream(bID) },
 		10*time.Second, 100*time.Millisecond, "node-a must have a writer to node-b again")
 	require.True(t, receives(t, a, bMsgs, 15*time.Second), "node-a's messages must reach node-b again")
-
-	after := make([]string, 0, len(before))
-	for _, conn := range a.host.Network().ConnsToPeer(bID) {
-		after = append(after, conn.ID())
-	}
-	require.ElementsMatch(t, before, after, "recovery must keep the existing connection")
-}
-
-// waitFor polls cond until it holds or timeout elapses.
-func waitFor(timeout time.Duration, cond func() bool) bool {
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if cond() {
-			return true
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-
-	return cond()
+	require.ElementsMatch(t, before, connIDs(a, bID), "recovery must keep the existing connection")
 }

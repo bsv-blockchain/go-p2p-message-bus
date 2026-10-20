@@ -136,6 +136,10 @@ type client struct {
 	addrLookupsMu       sync.Mutex
 	addrLookupsInFlight map[peer.ID]struct{}
 
+	// background tracks goroutines that use the host after NewClient returns
+	// (the topic peer watchdog); Close waits for them before tearing it down.
+	background sync.WaitGroup
+
 	// protoEmitterOnce guards the lazy creation of protoEmitter, which the topic
 	// peer watchdog uses to make pubsub rebuild a missing writer.
 	protoEmitterOnce sync.Once
@@ -270,7 +274,11 @@ func NewClient(config Config) (Client, error) {
 
 	// Rebuild the gossipsub session of any managed peer that stays connected but
 	// drops out of our topics (see topicPeerWatchdog).
-	go c.monitorTopicPeers(ctx, recoveryPeers(config, bootstrapPeers, staticPeers))
+	c.background.Add(1)
+	go func() {
+		defer c.background.Done()
+		c.monitorTopicPeers(recoveryPeers(config, bootstrapPeers, staticPeers))
+	}()
 
 	// Start DHT discovery (only if DHT is enabled)
 	if kadDHT != nil {
@@ -888,6 +896,10 @@ func (c *client) Close() error {
 		case <-time.After(closeReadersWait):
 			c.logger.Warnf("Subscription readers did not exit within %s, tearing down host anyway", closeReadersWait)
 		}
+
+		// The watchdog exits on the cancelled context; wait for it so it never
+		// touches the emitter or the host while they are being closed.
+		c.background.Wait()
 
 		c.mu.Lock()
 		// Close all topics

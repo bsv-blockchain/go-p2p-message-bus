@@ -44,6 +44,10 @@ type TopicPeerLister interface {
 	TopicPeers(topic string) []string
 }
 
+// The client must keep implementing TopicPeerLister: callers reach it by type
+// assertion, which would otherwise fail silently at runtime.
+var _ TopicPeerLister = (*client)(nil)
+
 // P2PClient is a type alias for Client, maintained for backward compatibility.
 //
 //nolint:revive // P2PClient is intentionally named for backward compatibility, stuttering is acceptable

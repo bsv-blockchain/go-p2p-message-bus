@@ -1,7 +1,6 @@
 package p2p
 
 import (
-	"context"
 	"slices"
 	"strings"
 	"time"
@@ -11,17 +10,43 @@ import (
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/protocol"
+	"github.com/multiformats/go-multiaddr"
 )
 
 const (
 	defaultTopicPeerRecoveryGrace       = 30 * time.Second
 	defaultTopicPeerRecoveryMinInterval = 2 * time.Minute
 	topicPeerCheckInterval              = 5 * time.Second
-	// maxConsecutiveResets is how many resets a peer gets without reappearing in
-	// any watched topic before the watchdog stops resetting it. A peer that left
-	// a topic on purpose is not reset forever; seeing it in a topic again
-	// re-arms the watchdog.
+
+	// maxConsecutiveResets is how many resets a peer gets over one topic without
+	// reappearing in that topic. A peer that left a topic on purpose is not
+	// reset forever. Seeing it in that topic again, or a new connection (a new
+	// session), re-arms the topic.
 	maxConsecutiveResets = 3
+
+	// maxResetsPerWindow caps all resets of one peer within resetWindow, and the
+	// cap is not cleared when the peer reappears. A stream reset kills the
+	// remote's gossipsub writer to us, and go-libp2p-pubsub (v0.18.0,
+	// backoff.go: MaxBackoffAttempts = 4, TimeToLive = 10m, sliding) respawns a
+	// dead writer for a still-connected peer only four times per window; the
+	// fifth death drops it for good while the connection stays up. Two resets
+	// leave headroom for real deaths in the same window, such as the overlapping
+	// restart this watchdog exists for.
+	maxResetsPerWindow = 2
+	resetWindow        = 10 * time.Minute
+
+	// writerRepairInitialDelay and writerRepairMaxDelay bound the per-peer
+	// backoff between writer repairs while a peer's writer stays missing.
+	writerRepairInitialDelay = 10 * time.Second
+	writerRepairMaxDelay     = 5 * time.Minute
+
+	// writerRepairAfterReset skips writer repair right after our own reset,
+	// while pubsub is still respawning the writer it just lost.
+	writerRepairAfterReset = 15 * time.Second
+
+	// topicPeerRedialDelay gives both sides time to tear the closed session down
+	// before we dial again.
+	topicPeerRedialDelay = 500 * time.Millisecond
 )
 
 // topicPeerWatchdog decides when a managed peer that is connected but missing
@@ -35,9 +60,8 @@ const (
 // handling clears ALL topic state for that peer ID, and since the peer is still
 // connected it only respawns its own writer. The surviving session never
 // re-announces its subscriptions, so the peer stays connected but absent from
-// every topic, permanently. Resetting the gossipsub streams to the peer makes
-// both sides respawn their writers and resend their subscriptions, without
-// touching the connection.
+// every topic, permanently. See resetPeerSession for how the session is
+// rebuilt.
 //
 // Without assumeShared, a peer is only watched on a topic after this process
 // has seen it there, so a process that starts up already facing the stale
@@ -58,8 +82,13 @@ type topicPeerWatchdog struct {
 	missingSince map[peer.ID]map[string]time.Time
 	lastReset    map[peer.ID]time.Time
 	// consecutiveResets counts, per topic, resets of the peer since it was last
-	// seen in that topic. Presence in another topic does not re-arm it.
+	// seen in that topic or last disconnected. Presence in another topic does
+	// not re-arm it.
 	consecutiveResets map[peer.ID]map[string]int
+	// resetHistory holds the times of the peer's resets within resetWindow.
+	resetHistory map[peer.ID][]time.Time
+
+	repair *writerRepairBackoff
 }
 
 func newTopicPeerWatchdog(grace, minResetInterval time.Duration, assumeShared bool) *topicPeerWatchdog {
@@ -72,6 +101,8 @@ func newTopicPeerWatchdog(grace, minResetInterval time.Duration, assumeShared bo
 		lastReset:        make(map[peer.ID]time.Time),
 
 		consecutiveResets: make(map[peer.ID]map[string]int),
+		resetHistory:      make(map[peer.ID][]time.Time),
+		repair:            newWriterRepairBackoff(),
 	}
 }
 
@@ -91,9 +122,17 @@ func (w *topicPeerWatchdog) observe(now time.Time, id peer.ID, topic string, con
 	}
 
 	// A disconnected peer belongs to the reconnect loop, and the grace period
-	// only counts time spent connected.
+	// only counts time spent connected. The next connection is a new session,
+	// so the per-topic give-up starts over, unless the disconnect is our own
+	// reset closing the connection (otherwise a peer that left a topic on
+	// purpose would never be given up on).
 	if !connected {
 		delete(w.missingSince[id], topic)
+
+		if !w.recentlyReset(now, id, w.minResetInterval) {
+			delete(w.consecutiveResets, id)
+		}
+
 		return false
 	}
 
@@ -101,11 +140,11 @@ func (w *topicPeerWatchdog) observe(now time.Time, id peer.ID, topic string, con
 		return false
 	}
 
-	if w.consecutiveResets[id][topic] >= maxConsecutiveResets {
+	if w.consecutiveResets[id][topic] >= maxConsecutiveResets || w.windowFull(now, id) {
 		return false
 	}
 
-	return w.missingPastGrace(now, id, topic) && !w.resetTooRecent(now, id)
+	return w.missingPastGrace(now, id, topic) && !w.recentlyReset(now, id, w.minResetInterval)
 }
 
 // missingPastGrace starts or reads id's missing-since timer for topic and
@@ -124,18 +163,28 @@ func (w *topicPeerWatchdog) missingPastGrace(now time.Time, id peer.ID, topic st
 	return now.Sub(since) >= w.grace
 }
 
-// resetTooRecent reports whether id was reset less than minResetInterval ago.
-func (w *topicPeerWatchdog) resetTooRecent(now time.Time, id peer.ID) bool {
+// recentlyReset reports whether id was reset less than d ago.
+func (w *topicPeerWatchdog) recentlyReset(now time.Time, id peer.ID, d time.Duration) bool {
 	last, ok := w.lastReset[id]
 
-	return ok && now.Sub(last) < w.minResetInterval
+	return ok && now.Sub(last) < d
+}
+
+// windowFull reports whether id has used up its resets for the current window,
+// dropping history that has slid out of it.
+func (w *topicPeerWatchdog) windowFull(now time.Time, id peer.ID) bool {
+	history := slices.DeleteFunc(w.resetHistory[id], func(at time.Time) bool { return now.Sub(at) >= resetWindow })
+	w.resetHistory[id] = history
+
+	return len(history) >= maxResetsPerWindow
 }
 
 // recordReset notes that id's session was reset at now over topics. The grace
-// timers for id restart from scratch, and each topic's reset count grows until
-// the peer is seen in that topic again.
+// timers for id restart from scratch, each topic's reset count grows until the
+// peer is seen in that topic again, and the reset counts against the window.
 func (w *topicPeerWatchdog) recordReset(now time.Time, id peer.ID, topics []string) {
 	w.lastReset[id] = now
+	w.resetHistory[id] = append(w.resetHistory[id], now)
 	delete(w.missingSince, id)
 
 	if w.consecutiveResets[id] == nil {
@@ -145,6 +194,49 @@ func (w *topicPeerWatchdog) recordReset(now time.Time, id peer.ID, topics []stri
 	for _, topic := range topics {
 		w.consecutiveResets[id][topic]++
 	}
+}
+
+// writerRepairBackoff spaces out writer repairs for a peer whose writer stays
+// missing, so a repair that cannot succeed (the remote refuses new streams, for
+// example) does not retry every round for the life of the connection.
+type writerRepairBackoff struct {
+	delay map[peer.ID]time.Duration
+	next  map[peer.ID]time.Time
+}
+
+func newWriterRepairBackoff() *writerRepairBackoff {
+	return &writerRepairBackoff{
+		delay: make(map[peer.ID]time.Duration),
+		next:  make(map[peer.ID]time.Time),
+	}
+}
+
+// allow reports whether a repair for id may run at now.
+func (b *writerRepairBackoff) allow(now time.Time, id peer.ID) bool {
+	next, ok := b.next[id]
+
+	return !ok || !now.Before(next)
+}
+
+// record notes a repair for id at now and doubles the delay before the next.
+func (b *writerRepairBackoff) record(now time.Time, id peer.ID) {
+	d := b.delay[id] * 2
+	if d == 0 {
+		d = writerRepairInitialDelay
+	}
+
+	if d > writerRepairMaxDelay {
+		d = writerRepairMaxDelay
+	}
+
+	b.delay[id] = d
+	b.next[id] = now.Add(d)
+}
+
+// clear resets the backoff for id once it has a writer again.
+func (b *writerRepairBackoff) clear(id peer.ID) {
+	delete(b.delay, id)
+	delete(b.next, id)
 }
 
 // TopicPeers returns the IDs of the peers gossipsub currently has in topic, or
@@ -168,27 +260,49 @@ func (c *client) TopicPeers(topic string) []string {
 	return out
 }
 
-// recoveryPeers returns the peers the topic peer watchdog watches: the
-// bootstrap peers NewClient selected, when they were explicitly configured, and
-// the static peers. bootstrapPeers is NewClient's already-resolved snapshot, so
-// /dnsaddr/ entries are not looked up a second time (a second lookup could fail
-// or disagree and drop a connected bootstrap peer from recovery). When
-// BootstrapPeers is empty the snapshot is the public IPFS fallback, whose nodes
-// never join our topics, and it is excluded.
+// recoveryPeers returns the peers the topic peer watchdog watches, one entry
+// per peer ID: the bootstrap peers NewClient selected, when they were
+// explicitly configured, and the static peers. bootstrapPeers is NewClient's
+// already-resolved snapshot, so /dnsaddr/ entries are not looked up a second
+// time (a second lookup could fail or disagree and drop a connected bootstrap
+// peer from recovery). When BootstrapPeers is empty the snapshot is the public
+// IPFS fallback, whose nodes never join our topics, and it is excluded. A peer
+// listed several times (a /dnsaddr/ resolving to one entry per address, or the
+// same peer in both lists) is merged into one entry with all its addresses.
 func recoveryPeers(config Config, bootstrapPeers, staticPeers []peer.AddrInfo) []peer.AddrInfo {
-	var watched []peer.AddrInfo
+	candidates := staticPeers
 	if len(config.BootstrapPeers) > 0 {
-		watched = append(watched, bootstrapPeers...)
+		candidates = append(append([]peer.AddrInfo{}, bootstrapPeers...), staticPeers...)
 	}
 
-	return append(watched, staticPeers...)
+	index := make(map[peer.ID]int, len(candidates))
+	watched := make([]peer.AddrInfo, 0, len(candidates))
+
+	for _, pi := range candidates {
+		i, ok := index[pi.ID]
+		if !ok {
+			index[pi.ID] = len(watched)
+			watched = append(watched, peer.AddrInfo{ID: pi.ID, Addrs: slices.Clone(pi.Addrs)})
+
+			continue
+		}
+
+		for _, addr := range pi.Addrs {
+			if !slices.ContainsFunc(watched[i].Addrs, addr.Equal) {
+				watched[i].Addrs = append(watched[i].Addrs, addr)
+			}
+		}
+	}
+
+	return watched
 }
 
-// monitorTopicPeers runs the topic peer watchdog over the managed peers for the
-// lifetime of ctx. When a managed peer has been connected but missing from a
-// topic for longer than the grace period, it closes the connection and redials,
-// which makes both sides drop the stale gossipsub session and handshake again.
-func (c *client) monitorTopicPeers(ctx context.Context, managed []peer.AddrInfo) {
+// monitorTopicPeers runs the topic peer watchdog over the managed peers until
+// the client is closed. When a managed peer has been connected but missing
+// from a topic for longer than the grace period, resetPeerSession rebuilds its
+// gossipsub session; each round also rebuilds a missing gossipsub writer to a
+// connected managed peer.
+func (c *client) monitorTopicPeers(managed []peer.AddrInfo) {
 	if c.config.DisableTopicPeerRecovery || len(managed) == 0 {
 		return
 	}
@@ -210,22 +324,38 @@ func (c *client) monitorTopicPeers(ctx context.Context, managed []peer.AddrInfo)
 
 	for {
 		select {
-		case <-ctx.Done():
+		case <-c.ctx.Done():
 			return
 		case <-ticker.C:
-			c.checkTopicPeers(ctx, w, managed, time.Now())
+			c.checkTopicPeers(w, managed, time.Now())
 		}
 	}
 }
 
 // checkTopicPeers feeds one round of observations to w and resets every peer
 // it flags.
-func (c *client) checkTopicPeers(ctx context.Context, w *topicPeerWatchdog, managed []peer.AddrInfo, now time.Time) {
-	// Only topics we subscribe to count. Publish joins a topic without
-	// subscribing, and a managed peer is never "missing" from a topic we only
-	// publish to.
-	// ListPeers round-trips through the pubsub event loop, so collect the topic
-	// handles under the lock and query them after releasing it.
+func (c *client) checkTopicPeers(w *topicPeerWatchdog, managed []peer.AddrInfo, now time.Time) {
+	if c.ctx.Err() != nil {
+		return
+	}
+
+	topicPeers := c.subscribedTopicPeers()
+
+	for _, pi := range managed {
+		if pi.ID == c.host.ID() || c.ctx.Err() != nil {
+			continue
+		}
+
+		c.checkManagedPeer(w, pi, topicPeers, now)
+	}
+}
+
+// subscribedTopicPeers returns the gossipsub peers of every topic we subscribe
+// to. Only subscribed topics count: Publish joins a topic without subscribing,
+// and a managed peer is never "missing" from a topic we only publish to.
+// ListPeers round-trips through the pubsub event loop, so the topic handles are
+// collected under the lock and queried after releasing it.
+func (c *client) subscribedTopicPeers() map[string][]peer.ID {
 	c.mu.RLock()
 	watched := make(map[string]*pubsub.Topic, len(c.subs))
 	for name := range c.subs {
@@ -240,47 +370,77 @@ func (c *client) checkTopicPeers(ctx context.Context, w *topicPeerWatchdog, mana
 		topicPeers[name] = t.ListPeers()
 	}
 
-	for _, pi := range managed {
-		if pi.ID == c.host.ID() {
-			continue
+	return topicPeers
+}
+
+// checkManagedPeer runs one round of the watchdog for pi: it repairs a missing
+// writer, records pi's topic membership, and resets pi if the watchdog flags it.
+func (c *client) checkManagedPeer(w *topicPeerWatchdog, pi peer.AddrInfo, topicPeers map[string][]peer.ID, now time.Time) {
+	connected := c.host.Network().Connectedness(pi.ID) == network.Connected
+	if connected {
+		c.maybeRepairWriter(w, pi.ID, now)
+	}
+
+	var missing []string
+
+	for name, members := range topicPeers {
+		if w.observe(now, pi.ID, name, connected, slices.Contains(members, pi.ID)) {
+			missing = append(missing, name)
 		}
+	}
 
-		connected := c.host.Network().Connectedness(pi.ID) == network.Connected
-		if connected {
-			c.repairWriter(pi.ID)
-		}
+	if len(missing) == 0 {
+		return
+	}
 
-		var missing []string
+	slices.Sort(missing)
+	w.recordReset(now, pi.ID, missing)
+	c.resetPeerSession(pi, missing)
+}
 
-		for name, members := range topicPeers {
-			if w.observe(now, pi.ID, name, connected, slices.Contains(members, pi.ID)) {
-				missing = append(missing, name)
-			}
-		}
+// resetPeerSession rebuilds the gossipsub session with pi. The reset is
+// per-peer, not per-topic: it briefly interrupts every topic shared with the
+// peer, including healthy ones, until both sides have re-announced their
+// subscriptions and re-grafted.
+//
+// For a peer that does not relay for us, it closes the connection and redials.
+// Both sides then drop the peer and handshake from scratch, and because the
+// peer is no longer connected when its writer dies, go-libp2p-pubsub does not
+// count it against the remote's writer-respawn budget. This works whether or
+// not the remote runs this watchdog.
+//
+// For a peer that relays for us (we hold a reservation on it, or a connection
+// is relayed through it), closing the connection would drop relay reservations
+// and relayed connections to unrelated peers, so only the gossipsub streams
+// are reset. That kills both writers while the connection stays up, which
+// costs each side one writer respawn; maxResetsPerWindow keeps us within the
+// remote's budget, and our own side is repaired by maybeRepairWriter, but a
+// remote that has already exhausted its budget for us can only recover itself
+// (or on a new connection).
+func (c *client) resetPeerSession(pi peer.AddrInfo, topics []string) {
+	name := c.peerTracker.getName(pi.ID)
 
-		if len(missing) == 0 {
-			continue
-		}
+	if c.relayInUse(pi.ID) {
+		c.logger.Warnf("Managed peer %s [%s] connected but missing from topics %v; it relays for us, resetting its gossipsub streams",
+			pi.ID.String(), name, topics)
+		c.logger.Debugf("Reset %d gossipsub stream(s) to peer %s", c.resetPeerStreams(pi.ID), pi.ID.String())
+	} else {
+		c.logger.Warnf("Managed peer %s [%s] connected but missing from topics %v; closing the connection to rebuild its gossipsub session",
+			pi.ID.String(), name, topics)
+		c.closePeerSession(pi)
+	}
 
-		slices.Sort(missing)
-		w.recordReset(now, pi.ID, missing)
-		c.resetPeerSession(ctx, pi, missing)
+	if cb := c.config.OnTopicPeerReset; cb != nil {
+		cb(pi.ID.String(), topics)
 	}
 }
 
-// resetPeerSession resets the gossipsub streams to pi without closing the
-// connection: bootstrap peers double as relays, and closing the connection
-// would drop relay reservations and relayed connections to unrelated peers.
-// Resetting our outbound stream makes pubsub respawn its writer and resend our
-// subscriptions; resetting the inbound one makes the remote do the same, so
-// it re-announces its subscriptions to us.
-func (c *client) resetPeerSession(_ context.Context, pi peer.AddrInfo, topics []string) {
-	c.logger.Warnf("Managed peer %s [%s] connected but missing from topics %v; resetting its gossipsub streams",
-		pi.ID.String(), c.peerTracker.getName(pi.ID), topics)
-
+// resetPeerStreams resets every gossipsub stream to id and leaves the
+// connection open. It returns how many streams it reset.
+func (c *client) resetPeerStreams(id peer.ID) int {
 	reset := 0
 
-	for _, conn := range c.host.Network().ConnsToPeer(pi.ID) {
+	for _, conn := range c.host.Network().ConnsToPeer(id) {
 		for _, s := range conn.GetStreams() {
 			if isPubSubProtocol(s.Protocol()) {
 				_ = s.Reset()
@@ -289,16 +449,61 @@ func (c *client) resetPeerSession(_ context.Context, pi peer.AddrInfo, topics []
 		}
 	}
 
-	c.logger.Debugf("Reset %d gossipsub stream(s) to peer %s", reset, pi.ID.String())
-
-	if cb := c.config.OnTopicPeerReset; cb != nil {
-		cb(pi.ID.String(), topics)
-	}
+	return reset
 }
 
-// isPubSubProtocol reports whether proto is a gossipsub or floodsub protocol.
+// closePeerSession closes every connection to pi and dials it again.
+func (c *client) closePeerSession(pi peer.AddrInfo) {
+	if err := c.host.Network().ClosePeer(pi.ID); err != nil {
+		c.logger.Warnf("Failed to close connection to peer %s: %v", pi.ID.String(), err)
+	}
+
+	go func() {
+		select {
+		case <-c.ctx.Done():
+			return
+		case <-time.After(topicPeerRedialDelay):
+		}
+
+		if err := c.host.Connect(c.ctx, pi); err != nil {
+			c.logger.Debugf("Redial of peer %s after session reset failed (the managed-peer reconnect loop retries): %v", pi.ID.String(), err)
+		}
+	}()
+}
+
+// relayInUse reports whether id currently carries relay traffic for us.
+func (c *client) relayInUse(id peer.ID) bool {
+	conns := c.host.Network().Conns()
+	connAddrs := make([]multiaddr.Multiaddr, 0, len(conns))
+
+	for _, conn := range conns {
+		connAddrs = append(connAddrs, conn.RemoteMultiaddr())
+	}
+
+	return relayInUse(id, c.host.Addrs(), connAddrs)
+}
+
+// relayInUse reports whether relay is in use as a circuit relay: one of our
+// own addresses is a circuit through it (we hold a reservation on it), or one
+// of our connections is relayed through it.
+func relayInUse(relay peer.ID, hostAddrs, connAddrs []multiaddr.Multiaddr) bool {
+	marker := "/p2p/" + relay.String() + "/p2p-circuit"
+
+	for _, addrs := range [][]multiaddr.Multiaddr{hostAddrs, connAddrs} {
+		for _, addr := range addrs {
+			if addr != nil && strings.Contains(addr.String(), marker) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// isPubSubProtocol reports whether proto is one of the gossipsub (or floodsub)
+// protocols this client's pubsub speaks.
 func isPubSubProtocol(proto protocol.ID) bool {
-	return strings.HasPrefix(string(proto), "/meshsub/") || strings.HasPrefix(string(proto), "/floodsub/")
+	return slices.Contains(pubsub.GossipSubDefaultProtocols, proto)
 }
 
 // hasOutboundPubSubStream reports whether we have a gossipsub writer stream open
@@ -313,6 +518,24 @@ func (c *client) hasOutboundPubSubStream(id peer.ID) bool {
 	}
 
 	return false
+}
+
+// maybeRepairWriter rebuilds a missing writer to id, unless we reset the peer
+// a moment ago (pubsub is still respawning the writer) or the per-peer backoff
+// says to wait.
+func (c *client) maybeRepairWriter(w *topicPeerWatchdog, id peer.ID, now time.Time) {
+	if c.hasOutboundPubSubStream(id) {
+		w.repair.clear(id)
+		return
+	}
+
+	if w.recentlyReset(now, id, writerRepairAfterReset) || !w.repair.allow(now, id) {
+		return
+	}
+
+	if c.repairWriter(id) {
+		w.repair.record(now, id)
+	}
 }
 
 // peerProtocolsEmitter returns the emitter used to re-announce a peer's
@@ -331,19 +554,23 @@ func (c *client) peerProtocolsEmitter() event.Emitter {
 	return c.protoEmitter
 }
 
-// repairWriter makes pubsub rebuild its writer to a connected peer that has
-// none. go-libp2p-pubsub respawns a dead writer for a still-connected peer only
-// a few times within its backoff window; after that it drops the peer's
-// outbound queue and never recreates it while the connection stays up, so
-// stream resets alone can leave a connected peer that never hears from us.
-// Re-announcing the peer's gossipsub protocols makes pubsub treat it as a new
-// peer and open a fresh writer, without touching the connection. It reports
-// whether it asked pubsub to rebuild.
+// repairWriter asks pubsub to rebuild its writer to a connected peer that has
+// none, and reports whether it asked.
+//
+// go-libp2p-pubsub respawns a dead writer for a still-connected peer only a
+// few times per backoff window; after that it drops the peer's outbound queue
+// and never recreates it while the connection stays up, so stream resets can
+// leave a connected peer that never hears from us.
+//
+// This relies on go-libp2p-pubsub internals (v0.18.0, peer_notify.go and
+// pubsub.go): watchForNewPeers subscribes to EvtPeerProtocolsUpdated and calls
+// notifyNewPeer when Added contains a supported protocol, and
+// handlePendingPeers then opens a new writer for a connected peer that is not
+// in p.peers (it does nothing for one that is). A pubsub upgrade that changes
+// that path would silently disable this repair. The event is emitted on the
+// host-wide bus, so other subscribers (kad-dht, for one) also see a protocols
+// update that adds nothing new.
 func (c *client) repairWriter(id peer.ID) bool {
-	if c.hasOutboundPubSubStream(id) {
-		return false
-	}
-
 	protos, err := c.host.Peerstore().GetProtocols(id)
 	if err != nil {
 		return false
@@ -360,11 +587,11 @@ func (c *client) repairWriter(id peer.ID) bool {
 	}
 
 	if err := em.Emit(event.EvtPeerProtocolsUpdated{Peer: id, Added: protos}); err != nil {
-		c.logger.Warnf("Failed to re-announce gossipsub protocols for peer %s: %v", id.String(), err)
+		c.logger.Debugf("Failed to re-announce gossipsub protocols for peer %s: %v", id.String(), err)
 		return false
 	}
 
-	c.logger.Infof("No gossipsub writer to managed peer %s [%s]; asked pubsub to rebuild it", id.String(), c.peerTracker.getName(id))
+	c.logger.Debugf("No gossipsub writer to managed peer %s [%s]; asked pubsub to rebuild it", id.String(), c.peerTracker.getName(id))
 
 	return true
 }

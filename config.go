@@ -324,25 +324,28 @@ type Config struct {
 	// session had just announced, and the peer stays connected but out of every
 	// topic until the connection closes.
 	//
-	// Recovery resets only the gossipsub streams to the peer, never the
-	// connection, so relay reservations and relayed connections through a
-	// bootstrap peer survive. A peer gets at most 3 resets per topic without
-	// reappearing in that topic; after that the watchdog leaves that topic alone
-	// until the peer is seen in it again. Each round also rebuilds a missing
-	// gossipsub writer to a connected managed peer (pubsub stops respawning one
-	// after a few deaths within its backoff window), again without closing the
-	// connection.
+	// A reset is per peer and briefly interrupts every topic shared with it. For a
+	// peer that does not relay for us, the watchdog closes the connection and
+	// redials, which rebuilds both sides whether or not the remote runs this
+	// watchdog. For a peer that relays for us (we hold a reservation on it, or a
+	// connection is relayed through it), it resets only the gossipsub streams so
+	// relay reservations and relayed connections survive. Stream resets cost the
+	// remote one of go-libp2p-pubsub's four writer respawns per ten minutes, so a
+	// peer is reset at most twice per ten minutes, and at most 3 times per topic
+	// without reappearing in that topic (a new connection re-arms the topic).
+	// Each round also rebuilds a missing gossipsub writer to a connected managed
+	// peer, with a per-peer backoff, without closing the connection.
 	// Default: false (recovery enabled).
 	DisableTopicPeerRecovery bool
 
 	// TopicPeerRecoveryGrace is how long a managed peer may stay connected but
-	// missing from a subscribed topic before its gossipsub streams are reset so
-	// both sides redo the handshake. If not provided or zero, defaults to 30
-	// seconds.
+	// missing from a subscribed topic before its gossipsub session is reset (see
+	// DisableTopicPeerRecovery). If not provided or zero, defaults to 30 seconds.
 	TopicPeerRecoveryGrace time.Duration
 
 	// TopicPeerRecoveryMinInterval is the minimum time between two resets of the
-	// same peer. If not provided or zero, defaults to 2 minutes.
+	// same peer. Independently of it, a peer is reset at most twice per ten
+	// minutes. If not provided or zero, defaults to 2 minutes.
 	TopicPeerRecoveryMinInterval time.Duration
 
 	// ManagedPeersShareTopics declares that every managed peer subscribes to every
@@ -359,7 +362,7 @@ type Config struct {
 	ManagedPeersShareTopics bool
 
 	// OnTopicPeerReset, if set, is called after the watchdog resets a managed
-	// peer's gossipsub streams, with the topics it was missing from. Use it for
+	// peer's gossipsub session, with the topics it was missing from. Use it for
 	// metrics. It must not block.
 	OnTopicPeerReset func(peerID string, topics []string)
 }
