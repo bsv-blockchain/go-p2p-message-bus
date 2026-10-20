@@ -6,7 +6,6 @@ import (
 
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 const (
@@ -73,7 +72,7 @@ func TestWatchdogRateLimitsResetsPerPeer(t *testing.T) {
 
 	resetAt := t0.Add(time.Second + wdGrace)
 	assert.True(t, w.observe(resetAt, wdPeer, wdTopic, true, false))
-	w.recordReset(resetAt, wdPeer)
+	w.recordReset(resetAt, wdPeer, []string{wdTopic})
 
 	// Still missing right after the reset: wait out the minimum interval.
 	assert.False(t, w.observe(resetAt.Add(wdGrace+time.Second), wdPeer, wdTopic, true, false))
@@ -118,7 +117,7 @@ func TestWatchdogGivesUpAfterRepeatedResetsWithoutRecovery(t *testing.T) {
 		w.observe(now, wdPeer, wdTopic, true, false)
 		now = now.Add(wdMinInterval + wdGrace)
 		assert.True(t, w.observe(now, wdPeer, wdTopic, true, false), "reset %d", i+1)
-		w.recordReset(now, wdPeer)
+		w.recordReset(now, wdPeer, []string{wdTopic})
 	}
 
 	w.observe(now, wdPeer, wdTopic, true, false)
@@ -132,21 +131,48 @@ func TestWatchdogGivesUpAfterRepeatedResetsWithoutRecovery(t *testing.T) {
 }
 
 func TestRecoveryPeersUseOnlyExplicitlyConfiguredPeers(t *testing.T) {
-	key, err := GeneratePrivateKey()
-	require.NoError(t, err)
-	id, err := peer.IDFromPrivateKey(key)
-	require.NoError(t, err)
-
 	staticPeers := []peer.AddrInfo{{ID: "static-peer"}}
+	defaults := []peer.AddrInfo{{ID: "ipfs-default-bootstrap"}}
 
-	// No BootstrapPeers configured: the client falls back to the public IPFS
+	// No BootstrapPeers configured: NewClient fell back to the public IPFS
 	// bootstrap nodes, which never join our topics and must not be watched.
-	got := recoveryPeers(Config{}, staticPeers, &captureLogger{})
+	got := recoveryPeers(Config{}, defaults, staticPeers)
 	assert.Equal(t, staticPeers, got)
+}
 
-	cfg := Config{BootstrapPeers: []string{"/ip4/127.0.0.1/tcp/9905/p2p/" + id.String()}}
-	got = recoveryPeers(cfg, staticPeers, &captureLogger{})
-	assert.Len(t, got, 2)
-	assert.Equal(t, id, got[0].ID)
-	assert.Equal(t, staticPeers[0], got[1])
+func TestRecoveryPeersUseTheResolvedBootstrapSnapshot(t *testing.T) {
+	staticPeers := []peer.AddrInfo{{ID: "static-peer"}}
+	resolved := []peer.AddrInfo{{ID: "resolved-bootstrap"}}
+
+	// The explicit bootstrap set is resolved once by NewClient. A second DNS
+	// lookup could fail or return a different set and drop a connected
+	// bootstrap peer from recovery for the client's lifetime, so the snapshot
+	// must be used as-is.
+	cfg := Config{BootstrapPeers: []string{"/dnsaddr/bootstrap.invalid"}}
+	got := recoveryPeers(cfg, resolved, staticPeers)
+	assert.Equal(t, []peer.AddrInfo{resolved[0], staticPeers[0]}, got)
+}
+
+func TestWatchdogHealthyTopicDoesNotRearmResetsForLeftTopic(t *testing.T) {
+	w := newTestWatchdog(false)
+	now := time.Unix(1000, 0)
+
+	w.observe(now, wdPeer, "block", true, true)
+	w.observe(now, wdPeer, wdTopic, true, true)
+
+	// The peer left wdTopic on purpose and stays in "block". Its presence in
+	// "block" every round must not re-arm resets over wdTopic.
+	resets := 0
+	for i := 0; i < 10; i++ {
+		w.observe(now, wdPeer, "block", true, true)
+		w.observe(now, wdPeer, wdTopic, true, false)
+		now = now.Add(wdMinInterval + wdGrace)
+		w.observe(now, wdPeer, "block", true, true)
+		if w.observe(now, wdPeer, wdTopic, true, false) {
+			w.recordReset(now, wdPeer, []string{wdTopic})
+			resets++
+		}
+	}
+
+	assert.Equal(t, maxConsecutiveResets, resets)
 }

@@ -326,9 +326,12 @@ type Config struct {
 	//
 	// Recovery resets only the gossipsub streams to the peer, never the
 	// connection, so relay reservations and relayed connections through a
-	// bootstrap peer survive. A peer gets at most 3 resets without reappearing
-	// in a topic; after that the watchdog leaves it alone until it is seen in a
-	// topic again.
+	// bootstrap peer survive. A peer gets at most 3 resets per topic without
+	// reappearing in that topic; after that the watchdog leaves that topic alone
+	// until the peer is seen in it again. Each round also rebuilds a missing
+	// gossipsub writer to a connected managed peer (pubsub stops respawning one
+	// after a few deaths within its backoff window), again without closing the
+	// connection.
 	// Default: false (recovery enabled).
 	DisableTopicPeerRecovery bool
 

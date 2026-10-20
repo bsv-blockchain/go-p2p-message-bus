@@ -273,3 +273,65 @@ func TestTopicPeerResetKeepsConnection(t *testing.T) {
 	require.ElementsMatch(t, before, connIDs(), "the reset must keep the existing connection")
 	require.True(t, receives(t, a, bMsgs, 10*time.Second), "messages must flow after the reset")
 }
+
+// TestTopicPeerRecoveryRebuildsExhaustedWriter covers repeated stream resets.
+// go-libp2p-pubsub respawns a dead writer for a still-connected peer only a
+// few times within its backoff window; after that it deletes the peer's
+// outbound queue and never recreates it while the connection stays up. A
+// watchdog round must notice the missing writer and rebuild it without
+// touching the connection.
+func TestTopicPeerRecoveryRebuildsExhaustedWriter(t *testing.T) {
+	keyA, err := GeneratePrivateKey()
+	require.NoError(t, err)
+	keyB, err := GeneratePrivateKey()
+	require.NoError(t, err)
+
+	a, _ := startTopicClient(t, "node-a", keyA, nil)
+	t.Cleanup(func() { _ = a.Close() })
+
+	b, bMsgs := startTopicClient(t, "node-b", keyB, []string{loopbackAddr(t, a)})
+	t.Cleanup(func() { _ = b.Close() })
+
+	bID := b.host.ID()
+	require.Eventually(t, func() bool { return topicHasPeer(a, bID) && a.hasOutboundPubSubStream(bID) },
+		15*time.Second, 100*time.Millisecond, "node-a should have a writer to node-b")
+
+	conns := a.host.Network().ConnsToPeer(bID)
+	before := make([]string, 0, len(conns))
+	for _, conn := range conns {
+		before = append(before, conn.ID())
+	}
+
+	// Exhaust pubsub's writer-respawn budget for node-b.
+	for i := 0; i < 6; i++ {
+		a.resetPeerSession(context.Background(), peer.AddrInfo{ID: bID}, []string{recoveryTopic})
+		_ = waitFor(3*time.Second, func() bool { return a.hasOutboundPubSubStream(bID) })
+	}
+
+	// One watchdog round must restore the writer.
+	w := newTopicPeerWatchdog(time.Minute, time.Minute, true)
+	a.checkTopicPeers(context.Background(), w, []peer.AddrInfo{{ID: bID}}, time.Now())
+
+	require.Eventually(t, func() bool { return a.hasOutboundPubSubStream(bID) },
+		10*time.Second, 100*time.Millisecond, "node-a must have a writer to node-b again")
+	require.True(t, receives(t, a, bMsgs, 15*time.Second), "node-a's messages must reach node-b again")
+
+	after := make([]string, 0, len(before))
+	for _, conn := range a.host.Network().ConnsToPeer(bID) {
+		after = append(after, conn.ID())
+	}
+	require.ElementsMatch(t, before, after, "recovery must keep the existing connection")
+}
+
+// waitFor polls cond until it holds or timeout elapses.
+func waitFor(timeout time.Duration, cond func() bool) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return true
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	return cond()
+}

@@ -24,6 +24,7 @@ import (
 	"github.com/libp2p/go-libp2p-kad-dht/records"
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
 	"github.com/libp2p/go-libp2p/core/crypto"
+	"github.com/libp2p/go-libp2p/core/event"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -134,6 +135,11 @@ type client struct {
 	// retry loop never runs two lookups for one target concurrently.
 	addrLookupsMu       sync.Mutex
 	addrLookupsInFlight map[peer.ID]struct{}
+
+	// protoEmitterOnce guards the lazy creation of protoEmitter, which the topic
+	// peer watchdog uses to make pubsub rebuild a missing writer.
+	protoEmitterOnce sync.Once
+	protoEmitter     event.Emitter
 }
 
 // NewClient creates and initializes a new P2P client.
@@ -264,7 +270,7 @@ func NewClient(config Config) (Client, error) {
 
 	// Rebuild the gossipsub session of any managed peer that stays connected but
 	// drops out of our topics (see topicPeerWatchdog).
-	go c.monitorTopicPeers(ctx, recoveryPeers(config, staticPeers, clientLogger))
+	go c.monitorTopicPeers(ctx, recoveryPeers(config, bootstrapPeers, staticPeers))
 
 	// Start DHT discovery (only if DHT is enabled)
 	if kadDHT != nil {
@@ -896,6 +902,11 @@ func (c *client) Close() error {
 		}
 		if c.dht != nil {
 			_ = c.dht.Close()
+		}
+		// Settle the lazy init so the emitter is either created or never will be.
+		c.protoEmitterOnce.Do(func() {})
+		if c.protoEmitter != nil {
+			_ = c.protoEmitter.Close()
 		}
 		_ = c.host.Close()
 		close(done)
