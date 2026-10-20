@@ -35,6 +35,15 @@ type Client interface {
 	Close() error
 }
 
+// TopicPeerLister is implemented by clients that can report gossipsub topic
+// membership. It is a separate interface so adding it does not break existing
+// Client implementations; callers type-assert for it.
+type TopicPeerLister interface {
+	// TopicPeers returns the IDs of the peers gossipsub currently has in topic,
+	// or nil if this client has not joined it.
+	TopicPeers(topic string) []string
+}
+
 // P2PClient is a type alias for Client, maintained for backward compatibility.
 //
 //nolint:revive // P2PClient is intentionally named for backward compatibility, stuttering is acceptable

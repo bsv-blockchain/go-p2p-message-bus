@@ -262,6 +262,10 @@ func NewClient(config Config) (Client, error) {
 		go c.maintainPeerSet(ctx, staticPeerKind, staticPeers)
 	}
 
+	// Rebuild the gossipsub session of any managed peer that stays connected but
+	// drops out of our topics (see topicPeerWatchdog).
+	go c.monitorTopicPeers(ctx, append(append([]peer.AddrInfo{}, bootstrapPeers...), staticPeers...))
+
 	// Start DHT discovery (only if DHT is enabled)
 	if kadDHT != nil {
 		go c.waitForDHTAndAdvertise(ctx, routingDiscovery)
