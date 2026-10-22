@@ -313,4 +313,60 @@ type Config struct {
 	// it in a PRUNE. Set this to true as an interim mitigation when peer scoring is not
 	// enabled. Default: false (peer exchange enabled).
 	DisablePeerExchange bool
+
+	// DisableTopicPeerRecovery turns off the watchdog that rebuilds the gossipsub
+	// session of a managed peer that stays connected but missing from one of the
+	// topics we subscribe to. Managed peers are the explicitly configured
+	// BootstrapPeers and StaticPeers; the default IPFS bootstrap nodes are never
+	// watched. The watchdog works around a go-libp2p-pubsub behaviour: when a node
+	// with a fixed identity restarts and its new process connects before the old
+	// one is gone, the old session's teardown clears the topic state the new
+	// session had just announced, and the peer stays connected but out of every
+	// topic until the connection closes.
+	//
+	// A reset is per peer and briefly interrupts every topic shared with it. For a
+	// peer we dialed that does not relay for us, the watchdog closes the
+	// connection and redials, which rebuilds both sides whether or not the remote
+	// runs this watchdog. For a peer that relays for us (we hold a reservation on
+	// it, or a connection is relayed through it), or that is only connected
+	// inbound (its configured address may be stale), it resets only the gossipsub
+	// streams so the connection survives. Stream resets cost the remote one of
+	// go-libp2p-pubsub's four writer respawns, which it gets back only after ten
+	// idle minutes, so a peer is reset at most twice until eleven minutes have
+	// passed since its latest reset, and at most 3 times per topic without
+	// reappearing in that topic (a new connection re-arms the topic).
+	// Each round also rebuilds a missing gossipsub writer to a connected managed
+	// peer, with a per-peer backoff, without closing the connection.
+	// Default: false (recovery enabled).
+	DisableTopicPeerRecovery bool
+
+	// TopicPeerRecoveryGrace is how long a managed peer may stay connected but
+	// missing from a subscribed topic before its gossipsub session is reset (see
+	// DisableTopicPeerRecovery). If not provided or zero, defaults to 30 seconds.
+	TopicPeerRecoveryGrace time.Duration
+
+	// TopicPeerRecoveryMinInterval is the minimum time between two resets of the
+	// same peer. Independently of it, a peer is reset at most twice until eleven
+	// minutes have passed since its latest reset. If not provided or zero,
+	// defaults to 2 minutes.
+	TopicPeerRecoveryMinInterval time.Duration
+
+	// ManagedPeersShareTopics declares that every managed peer subscribes to every
+	// topic this client subscribes to (true when all nodes run the same software,
+	// as in a fixed cluster). The watchdog then acts on a managed peer missing from
+	// a topic even if this process never saw it there.
+	//
+	// When false, a peer is only watched on a topic after this process has seen it
+	// there, so a pure bootstrap server that never joins our topics is left alone.
+	// The cost: a freshly started process that comes up already facing the stale
+	// state (it never sees the peer in a topic) cannot recover it; only the side
+	// that saw the peer before the state went stale does. Set this to true in
+	// deployments where every managed peer shares our topics. Default: false.
+	ManagedPeersShareTopics bool
+
+	// OnTopicPeerReset, if set, is called after the watchdog resets a managed
+	// peer's gossipsub session, with the topics it was missing from. Use it for
+	// metrics. It runs on the watchdog goroutine and must not block; a panic in
+	// it is recovered and logged.
+	OnTopicPeerReset func(peerID string, topics []string)
 }
