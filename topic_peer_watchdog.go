@@ -485,11 +485,11 @@ func (c *client) checkManagedPeer(w *topicPeerWatchdog, pi peer.AddrInfo, topicP
 // peer, including healthy ones, until both sides have re-announced their
 // subscriptions and re-grafted.
 //
-// For a peer we dialed that does not relay for us, it closes the connection and
-// redials. Both sides then drop the peer and handshake from scratch, and because the
-// peer is no longer connected when its writer dies, go-libp2p-pubsub does not
-// count it against the remote's writer-respawn budget. This works whether or
-// not the remote runs this watchdog.
+// For a peer we dialed that does not relay for us, it closes the connection
+// and redials. Both sides then drop the peer and handshake from scratch, and
+// because the peer is no longer connected when its writer dies,
+// go-libp2p-pubsub does not count it against the remote's writer-respawn
+// budget. This works whether or not the remote runs this watchdog.
 //
 // Only the gossipsub streams are reset, and the connection stays up, for a
 // peer that relays for us (we hold a reservation on it, or a connection is

@@ -231,10 +231,11 @@ func TestTopicPeerRecoveryIgnoresPublishOnlyTopics(t *testing.T) {
 
 // TestTopicPeerResetRecoversRemoteThatDoesNotManageUs covers the remote side of
 // a reset. Every stream reset also kills the remote's writer to us, which costs
-// the remote one of pubsub's four writer respawns per sliding window, and only
-// a remote that runs this watchdog with us as a managed peer can repair its own
-// writer. A peer that does not relay for us is therefore reset by closing the
-// connection, which the remote does not count against that budget, and redialed.
+// the remote one of pubsub's four writer respawns (returned only after ten idle
+// minutes), and only a remote that runs this watchdog with us as a managed peer
+// can repair its own writer. A peer we dialed that does not relay for us is
+// therefore reset by closing the connection, which the remote does not count
+// against that budget, and redialed.
 func TestTopicPeerResetRecoversRemoteThatDoesNotManageUs(t *testing.T) {
 	keyA, err := GeneratePrivateKey()
 	require.NoError(t, err)
