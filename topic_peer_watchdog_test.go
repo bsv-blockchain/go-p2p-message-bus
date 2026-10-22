@@ -1,6 +1,7 @@
 package p2p
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -115,10 +116,10 @@ func TestWatchdogGivesUpAfterRepeatedResetsWithoutRecovery(t *testing.T) {
 
 	// A peer that left the topic on purpose never comes back: after
 	// maxConsecutiveResets resets with no recovery, stop resetting it. Resets
-	// are spaced past the per-peer window so only the give-up is exercised.
+	// are spaced past the per-peer cooldown so only the give-up is exercised.
 	for i := 0; i < maxConsecutiveResets; i++ {
 		w.observe(now, wdPeer, wdTopic, true, false)
-		now = now.Add(resetWindow + wdGrace)
+		now = now.Add(resetCooldown + wdGrace)
 		assert.True(t, w.observe(now, wdPeer, wdTopic, true, false), "reset %d", i+1)
 		w.recordReset(now, wdPeer, []string{wdTopic})
 	}
@@ -180,14 +181,14 @@ func TestWatchdogHealthyTopicDoesNotRearmResetsForLeftTopic(t *testing.T) {
 	assert.Equal(t, maxConsecutiveResets, resets)
 }
 
-func TestWatchdogCapsResetsPerPeerWithinWindow(t *testing.T) {
+func TestWatchdogCapsResetsPerPeerWithinCooldown(t *testing.T) {
 	w := newTestWatchdog(false)
 	now := time.Unix(1000, 0)
 
 	// A peer that flaps in and out of a topic would otherwise be reset every
 	// minimum interval. Each reset also costs the remote one of pubsub's four
-	// writer respawns per sliding window, so cap resets per peer and keep the
-	// cap when the peer reappears.
+	// writer respawns, so cap resets per peer and keep the cap when the peer
+	// reappears.
 	resets := 0
 	for i := 0; i < 4; i++ {
 		w.observe(now, wdPeer, wdTopic, true, true)
@@ -198,10 +199,10 @@ func TestWatchdogCapsResetsPerPeerWithinWindow(t *testing.T) {
 			resets++
 		}
 	}
-	assert.Equal(t, maxResetsPerWindow, resets, "resets within one window")
+	assert.Equal(t, maxResetsPerCooldown, resets, "resets within one cooldown")
 
-	// Once the window has slid past the earlier resets, recovery is allowed again.
-	now = now.Add(resetWindow)
+	// Once the cooldown has passed since the latest reset, recovery is allowed again.
+	now = now.Add(resetCooldown)
 	w.observe(now, wdPeer, wdTopic, true, true)
 	w.observe(now, wdPeer, wdTopic, true, false)
 	assert.True(t, w.observe(now.Add(wdGrace), wdPeer, wdTopic, true, false))
@@ -216,7 +217,7 @@ func TestWatchdogDisconnectRearmsGivenUpTopic(t *testing.T) {
 	// Exhaust the per-topic give-up, spacing resets past the window cap.
 	for i := 0; i < maxConsecutiveResets; i++ {
 		w.observe(now, wdPeer, wdTopic, true, false)
-		now = now.Add(resetWindow + wdGrace)
+		now = now.Add(resetCooldown + wdGrace)
 		assert.True(t, w.observe(now, wdPeer, wdTopic, true, false), "reset %d", i+1)
 		w.recordReset(now, wdPeer, []string{wdTopic})
 	}
@@ -225,16 +226,78 @@ func TestWatchdogDisconnectRearmsGivenUpTopic(t *testing.T) {
 	w.observe(now.Add(time.Second), wdPeer, wdTopic, false, false)
 
 	w.observe(now, wdPeer, wdTopic, true, false)
-	now = now.Add(resetWindow + wdGrace)
+	now = now.Add(resetCooldown + wdGrace)
 	assert.False(t, w.observe(now, wdPeer, wdTopic, true, false), "given up")
 
 	// A disconnect ends that session; the next connection is a new one and a
 	// later stale state must be repairable even if the peer was not seen in the
 	// topic in between.
 	w.observe(now, wdPeer, wdTopic, false, false)
-	now = now.Add(resetWindow)
+	now = now.Add(resetCooldown)
 	w.observe(now, wdPeer, wdTopic, true, false)
 	assert.True(t, w.observe(now.Add(wdGrace), wdPeer, wdTopic, true, false), "re-armed by reconnect")
+}
+
+func TestWatchdogCooldownRunsFromLatestReset(t *testing.T) {
+	w := newTestWatchdog(false)
+	start := time.Unix(1000, 0)
+
+	// tryReset makes the peer reappear and then go missing so that its grace
+	// period ends at offset at, and reports whether the watchdog resets it then.
+	tryReset := func(at time.Duration) bool {
+		now := start.Add(at)
+		w.observe(now.Add(-wdGrace), wdPeer, wdTopic, true, true)
+		w.observe(now.Add(-wdGrace), wdPeer, wdTopic, true, false)
+
+		if !w.observe(now, wdPeer, wdTopic, true, false) {
+			return false
+		}
+
+		w.recordReset(now, wdPeer, []string{wdTopic})
+
+		return true
+	}
+
+	// go-libp2p-pubsub starts its writer-respawn count over only after ten idle
+	// minutes since the latest death, not as each death ages out. With a sliding
+	// window, resets at 0, 150, 605, 755 and 1210s would all pass while the
+	// remote never sees ten idle minutes, and the fifth would exhaust it.
+	assert.True(t, tryReset(0), "first reset")
+	assert.True(t, tryReset(150*time.Second), "second reset")
+	assert.False(t, tryReset(605*time.Second), "the first reset has aged ten minutes, but the second has not")
+	assert.False(t, tryReset(755*time.Second))
+	assert.False(t, tryReset(150*time.Second+resetCooldown-time.Second), "just before the cooldown after the latest reset")
+	// The grace timer does not run while the peer is capped, so the next reset
+	// comes one grace period after the cooldown ends.
+	assert.True(t, tryReset(150*time.Second+resetCooldown+wdGrace), "once the cooldown has passed since the latest reset")
+}
+
+func TestWatchdogNewConnectionRearmsGivenUpTopic(t *testing.T) {
+	w := newTestWatchdog(false)
+	now := time.Unix(1000, 0)
+
+	w.observeConns(now, wdPeer, []string{"conn-1"})
+	w.observe(now, wdPeer, wdTopic, true, true)
+
+	// Exhaust the per-topic give-up. Each reset closes the connection and
+	// redials it, which brings a new connection that must not re-arm the topic.
+	for i := 0; i < maxConsecutiveResets; i++ {
+		w.observe(now, wdPeer, wdTopic, true, false)
+		now = now.Add(resetCooldown + wdGrace)
+		require.True(t, w.observe(now, wdPeer, wdTopic, true, false), "reset %d", i+1)
+		w.recordReset(now, wdPeer, []string{wdTopic})
+		w.observeConns(now.Add(time.Second), wdPeer, []string{fmt.Sprintf("redial-%d", i)})
+	}
+
+	w.observe(now, wdPeer, wdTopic, true, false)
+	now = now.Add(resetCooldown + wdGrace)
+	assert.False(t, w.observe(now, wdPeer, wdTopic, true, false), "given up")
+
+	// The peer reconnects between two rounds, so no round ever sees it
+	// disconnected; the new connection alone must re-arm the topic.
+	w.observeConns(now, wdPeer, []string{"conn-2"})
+	w.observe(now, wdPeer, wdTopic, true, false)
+	assert.True(t, w.observe(now.Add(wdGrace), wdPeer, wdTopic, true, false), "re-armed by the new connection")
 }
 
 func TestRelayInUseDetectsCircuitThroughPeer(t *testing.T) {

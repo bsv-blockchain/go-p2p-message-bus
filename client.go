@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -137,8 +138,13 @@ type client struct {
 	addrLookupsInFlight map[peer.ID]struct{}
 
 	// background tracks goroutines that use the host after NewClient returns
-	// (the topic peer watchdog); Close waits for them before tearing it down.
+	// (the topic peer watchdog and its redials); Close waits for them, within
+	// closeReadersWait, before tearing it down.
 	background sync.WaitGroup
+
+	// relayAddrs holds our relay reservations as circuit addresses, kept up to
+	// date by the topic peer watchdog.
+	relayAddrs atomic.Pointer[[]multiaddr.Multiaddr]
 
 	// protoEmitterOnce guards the lazy creation of protoEmitter, which the topic
 	// peer watchdog uses to make pubsub rebuild a missing writer.
@@ -883,23 +889,23 @@ func (c *client) Close() error {
 		c.mu.Unlock()
 
 		// Wait for every reader to exit; each closes its own channel on the
-		// way out. Bounded so a reader stuck in a blocking user logger cannot
-		// hold the listening sockets open past the shutdown budget: after the
-		// wait budget the host is torn down anyway.
-		readersDone := make(chan struct{})
+		// way out. Then wait for the watchdog, which exits on the cancelled
+		// context, so it never touches the emitter or the host while they are
+		// being closed. Bounded so a reader or a watchdog stuck in a blocking
+		// user logger or callback cannot hold the listening sockets open past
+		// the shutdown budget: after the wait budget the host is torn down
+		// anyway, and a late watchdog call only fails against the closed host.
+		waitDone := make(chan struct{})
 		go func() {
 			c.readers.Wait()
-			close(readersDone)
+			c.background.Wait()
+			close(waitDone)
 		}()
 		select {
-		case <-readersDone:
+		case <-waitDone:
 		case <-time.After(closeReadersWait):
-			c.logger.Warnf("Subscription readers did not exit within %s, tearing down host anyway", closeReadersWait)
+			c.logger.Warnf("Subscription readers or topic peer watchdog did not exit within %s, tearing down host anyway", closeReadersWait)
 		}
-
-		// The watchdog exits on the cancelled context; wait for it so it never
-		// touches the emitter or the host while they are being closed.
-		c.background.Wait()
 
 		c.mu.Lock()
 		// Close all topics

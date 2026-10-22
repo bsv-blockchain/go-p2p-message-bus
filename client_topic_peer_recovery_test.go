@@ -302,6 +302,82 @@ func TestResetPeerStreamsKeepsConnection(t *testing.T) {
 	require.True(t, receives(t, a, bMsgs, 10*time.Second), "messages must flow after the reset")
 }
 
+// TestTopicPeerResetKeepsInboundOnlyConnection covers a managed peer that is
+// only connected inbound. Its configured address may be stale, so closing the
+// connection could leave us unable to dial it back; the reset falls back to the
+// gossipsub streams and keeps the connection.
+func TestTopicPeerResetKeepsInboundOnlyConnection(t *testing.T) {
+	keyA, err := GeneratePrivateKey()
+	require.NoError(t, err)
+	keyB, err := GeneratePrivateKey()
+	require.NoError(t, err)
+
+	// node-b dials node-a; node-a never dials node-b.
+	a, _ := startTopicClient(t, "node-a", keyA, nil)
+	b, bMsgs := startTopicClient(t, "node-b", keyB, []string{loopbackAddr(t, a)})
+	bID := b.host.ID()
+
+	require.Eventually(t, func() bool { return topicHasPeer(a, bID) && a.hasOutboundPubSubStream(bID) },
+		15*time.Second, 100*time.Millisecond, "node-b should join node-a's topic view")
+	require.False(t, a.hasOutboundConn(bID), "node-a must only be connected inbound")
+
+	before := connIDs(a, bID)
+
+	a.resetPeerSession(peer.AddrInfo{ID: bID}, []string{recoveryTopic})
+
+	require.Eventually(t, func() bool { return topicHasPeer(a, bID) && a.hasOutboundPubSubStream(bID) },
+		15*time.Second, 100*time.Millisecond, "node-b should be back in the topic after the reset")
+	require.ElementsMatch(t, before, connIDs(a, bID), "an inbound-only connection must be kept")
+	require.True(t, receives(t, a, bMsgs, 10*time.Second), "messages must flow after the reset")
+}
+
+// TestTopicPeerResetCallbackPanicIsRecovered checks that a panicking
+// OnTopicPeerReset cannot take the process down.
+func TestTopicPeerResetCallbackPanicIsRecovered(t *testing.T) {
+	logs := &captureLogger{}
+	c := &client{
+		config: Config{OnTopicPeerReset: func(string, []string) { panic("boom") }},
+		logger: logs,
+	}
+
+	require.NotPanics(t, func() { c.notifyTopicPeerReset(peer.ID("peer-b"), []string{recoveryTopic}) })
+	require.Contains(t, logs.String(), "OnTopicPeerReset panicked")
+}
+
+// TestCloseDoesNotWaitForeverOnBlockedWatchdog checks that a watchdog stuck in
+// a blocking OnTopicPeerReset does not stop Close from tearing the host down.
+func TestCloseDoesNotWaitForeverOnBlockedWatchdog(t *testing.T) {
+	key, err := GeneratePrivateKey()
+	require.NoError(t, err)
+
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+
+	cl, err := NewClient(Config{
+		Name:             "node-a",
+		PrivateKey:       key,
+		AllowPrivateIPs:  true,
+		Logger:           &captureLogger{},
+		OnTopicPeerReset: func(string, []string) { <-release },
+	})
+	require.NoError(t, err)
+
+	c := cl.(*client)
+	addr := loopbackAddr(t, c)
+
+	// Stand in for a watchdog round blocked in the callback.
+	c.background.Add(1)
+	go func() {
+		defer c.background.Done()
+		c.notifyTopicPeerReset(peer.ID("peer-b"), []string{recoveryTopic})
+	}()
+
+	require.NoError(t, cl.Close())
+
+	require.Eventually(t, func() bool { return len(c.host.Network().ListenAddresses()) == 0 },
+		closeTimeout, 50*time.Millisecond, "the host must be closed (%s)", addr)
+}
+
 // TestTopicPeerRecoveryRebuildsExhaustedWriter covers repeated stream resets.
 // go-libp2p-pubsub respawns a dead writer for a still-connected peer only a
 // few times within its backoff window; after that it deletes the peer's
