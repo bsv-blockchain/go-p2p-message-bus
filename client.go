@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -24,6 +25,7 @@ import (
 	"github.com/libp2p/go-libp2p-kad-dht/records"
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
 	"github.com/libp2p/go-libp2p/core/crypto"
+	"github.com/libp2p/go-libp2p/core/event"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -134,6 +136,20 @@ type client struct {
 	// retry loop never runs two lookups for one target concurrently.
 	addrLookupsMu       sync.Mutex
 	addrLookupsInFlight map[peer.ID]struct{}
+
+	// background tracks goroutines that use the host after NewClient returns
+	// (the topic peer watchdog and its redials); Close waits for them, within
+	// closeReadersWait, before tearing it down.
+	background sync.WaitGroup
+
+	// relayAddrs holds our relay reservations as circuit addresses, kept up to
+	// date by the topic peer watchdog.
+	relayAddrs atomic.Pointer[[]multiaddr.Multiaddr]
+
+	// protoEmitterOnce guards the lazy creation of protoEmitter, which the topic
+	// peer watchdog uses to make pubsub rebuild a missing writer.
+	protoEmitterOnce sync.Once
+	protoEmitter     event.Emitter
 }
 
 // NewClient creates and initializes a new P2P client.
@@ -261,6 +277,14 @@ func NewClient(config Config) (Client, error) {
 	if len(staticPeers) > 0 {
 		go c.maintainPeerSet(ctx, staticPeerKind, staticPeers)
 	}
+
+	// Rebuild the gossipsub session of any managed peer that stays connected but
+	// drops out of our topics (see topicPeerWatchdog).
+	c.background.Add(1)
+	go func() {
+		defer c.background.Done()
+		c.monitorTopicPeers(recoveryPeers(config, bootstrapPeers, staticPeers))
+	}()
 
 	// Start DHT discovery (only if DHT is enabled)
 	if kadDHT != nil {
@@ -865,18 +889,22 @@ func (c *client) Close() error {
 		c.mu.Unlock()
 
 		// Wait for every reader to exit; each closes its own channel on the
-		// way out. Bounded so a reader stuck in a blocking user logger cannot
-		// hold the listening sockets open past the shutdown budget: after the
-		// wait budget the host is torn down anyway.
-		readersDone := make(chan struct{})
+		// way out. Then wait for the watchdog, which exits on the cancelled
+		// context, so it never touches the emitter or the host while they are
+		// being closed. Bounded so a reader or a watchdog stuck in a blocking
+		// user logger or callback cannot hold the listening sockets open past
+		// the shutdown budget: after the wait budget the host is torn down
+		// anyway, and a late watchdog call only fails against the closed host.
+		waitDone := make(chan struct{})
 		go func() {
 			c.readers.Wait()
-			close(readersDone)
+			c.background.Wait()
+			close(waitDone)
 		}()
 		select {
-		case <-readersDone:
+		case <-waitDone:
 		case <-time.After(closeReadersWait):
-			c.logger.Warnf("Subscription readers did not exit within %s, tearing down host anyway", closeReadersWait)
+			c.logger.Warnf("Subscription readers or topic peer watchdog did not exit within %s, tearing down host anyway", closeReadersWait)
 		}
 
 		c.mu.Lock()
@@ -892,6 +920,11 @@ func (c *client) Close() error {
 		}
 		if c.dht != nil {
 			_ = c.dht.Close()
+		}
+		// Settle the lazy init so the emitter is either created or never will be.
+		c.protoEmitterOnce.Do(func() {})
+		if c.protoEmitter != nil {
+			_ = c.protoEmitter.Close()
 		}
 		_ = c.host.Close()
 		close(done)
