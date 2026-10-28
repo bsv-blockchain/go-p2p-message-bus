@@ -178,6 +178,14 @@ func main() {
 go get -u github.com/bsv-blockchain/go-p2p-message-bus
 ```
 
+**Patched go-libp2p-pubsub.** This module replaces `github.com/libp2p/go-libp2p-pubsub` with a fork that fixes peers dropping out of every topic, while still connected, after a node with a fixed identity is restarted while its old process is still up (a default Kubernetes rolling update). Go applies `replace` directives only in the main module, so applications using this library must add the same line to their own `go.mod` (copy it from this repository's `go.mod`):
+
+```
+replace github.com/libp2p/go-libp2p-pubsub => github.com/teracoder/go-libp2p-pubsub v0.0.0-20261028140932-1ec8b8df6b30
+```
+
+Check with `go list -m github.com/libp2p/go-libp2p-pubsub`, which should show the replacement. The replace will be removed once the fix is released upstream.
+
 <br/>
 
 ## 📚 Documentation

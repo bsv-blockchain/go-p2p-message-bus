@@ -823,6 +823,27 @@ func (c *client) GetPeers() []PeerInfo {
 	return peers
 }
 
+// TopicPeers returns the IDs of the peers gossipsub currently has in topic, or
+// nil if this client has not joined it.
+func (c *client) TopicPeers(topic string) []string {
+	c.mu.RLock()
+	t, ok := c.topics[topic]
+	c.mu.RUnlock()
+
+	if !ok {
+		return nil
+	}
+
+	ids := t.ListPeers()
+	out := make([]string, 0, len(ids))
+
+	for _, id := range ids {
+		out = append(out, id.String())
+	}
+
+	return out
+}
+
 // GetID returns this peer's ID as a string.
 func (c *client) GetID() string {
 	return c.host.ID().String()
