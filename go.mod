@@ -1,11 +1,11 @@
 module github.com/bsv-blockchain/go-p2p-message-bus
 
-go 1.26.0
+go 1.26.6
 
 require (
-	github.com/libp2p/go-libp2p v0.50.0
+	github.com/libp2p/go-libp2p v0.51.0
 	github.com/libp2p/go-libp2p-kad-dht v0.42.2
-	github.com/libp2p/go-libp2p-pubsub v0.18.0
+	github.com/libp2p/go-libp2p-pubsub v0.19.0
 	github.com/multiformats/go-multiaddr v0.16.1
 	github.com/multiformats/go-multiaddr-dns v0.6.0
 	github.com/stretchr/testify v1.12.1
@@ -92,7 +92,7 @@ require (
 	github.com/prometheus/common v0.72.0 // indirect
 	github.com/prometheus/procfs v0.22.0 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
-	github.com/quic-go/quic-go v0.63.0 // indirect
+	github.com/quic-go/quic-go v0.64.1 // indirect
 	github.com/quic-go/webtransport-go v0.13.0 // indirect
 	github.com/spaolacci/murmur3 v1.1.0 // indirect
 	github.com/whyrusleeping/go-keyspace v0.0.0-20160322163242-5b898ac5add1 // indirect
@@ -126,3 +126,9 @@ require (
 replace go.opentelemetry.io/otel/sdk => go.opentelemetry.io/otel/sdk v1.42.0
 
 replace google.golang.org/grpc v1.78.0 => google.golang.org/grpc v1.79.3
+
+// Patched pubsub: keeps a peer's topic state and writer when a duplicate
+// connection to it closes (fixed-identity rolling restarts). Review:
+// https://github.com/bsv-blockchain/go-libp2p-pubsub/pull/1. Consumers must add
+// the same replace (it does not propagate); drop it once upstream releases the fix.
+replace github.com/libp2p/go-libp2p-pubsub => github.com/teracoder/go-libp2p-pubsub v0.0.0-20261028140932-1ec8b8df6b30
