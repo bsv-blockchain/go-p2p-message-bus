@@ -1,11 +1,16 @@
 package p2p
 
 import (
+	"context"
 	"fmt"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/ipfs/go-cid"
+	"github.com/libp2p/go-libp2p/core/peer"
+	drouting "github.com/libp2p/go-libp2p/p2p/discovery/routing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -322,4 +327,182 @@ func TestDiscoverNowChannelDHTOff(t *testing.T) {
 	require.NotNil(t, msgChan)
 
 	time.Sleep(200 * time.Millisecond)
+}
+
+// blockingContentRouting mimics kad-dht FindProvidersAsync. Providers are sent
+// on an unbuffered channel, and the sender returns only when ctx is cancelled
+// or the send completes. sendAfter is far longer than the read deadline, so a
+// reader that has already stopped cannot drain the send.
+type blockingContentRouting struct {
+	sendAfter time.Duration
+	exited    chan struct{}
+}
+
+func newBlockingContentRouting() *blockingContentRouting {
+	return &blockingContentRouting{
+		sendAfter: time.Hour,
+		exited:    make(chan struct{}),
+	}
+}
+
+func (b *blockingContentRouting) Provide(context.Context, cid.Cid, bool) error {
+	return nil
+}
+
+func (b *blockingContentRouting) FindProvidersAsync(ctx context.Context, _ cid.Cid, _ int) <-chan peer.AddrInfo {
+	out := make(chan peer.AddrInfo)
+	go func() {
+		defer close(b.exited)
+		defer close(out)
+
+		timer := time.NewTimer(b.sendAfter)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
+
+		select {
+		case out <- peer.AddrInfo{}:
+		case <-ctx.Done():
+		}
+	}()
+	return out
+}
+
+// closingContentRouting closes the provider channel immediately, the same way
+// FindProvidersAsync does when the lookup finishes, and reports when that
+// lookup context is cancelled.
+type closingContentRouting struct {
+	cancelled chan struct{}
+	lookupErr error
+}
+
+func newClosingContentRouting() *closingContentRouting {
+	return &closingContentRouting{cancelled: make(chan struct{})}
+}
+
+func (r *closingContentRouting) Provide(context.Context, cid.Cid, bool) error {
+	return nil
+}
+
+func (r *closingContentRouting) FindProvidersAsync(ctx context.Context, _ cid.Cid, _ int) <-chan peer.AddrInfo {
+	go func() {
+		<-ctx.Done()
+		// The channel receive synchronizes with the test reading lookupErr.
+		r.lookupErr = ctx.Err()
+		close(r.cancelled)
+	}()
+
+	ch := make(chan peer.AddrInfo)
+	close(ch)
+	return ch
+}
+
+func goroutinesContaining(substr string) int {
+	buf := make([]byte, 64*1024)
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			return strings.Count(string(buf[:n]), substr)
+		}
+		buf = make([]byte, len(buf)*2)
+	}
+}
+
+// TestFindAndConnectPeersCancelsLookupWhenReaderStops verifies that each
+// FindPeers lookup is cancelled when the reader stops. Without that, kad-dht
+// query goroutines block forever on the unbuffered provider channel.
+func TestFindAndConnectPeersCancelsLookupWhenReaderStops(t *testing.T) {
+	privKey, err := GeneratePrivateKey()
+	require.NoError(t, err)
+
+	cl, err := NewClient(Config{
+		Name:       testPeerName,
+		PrivateKey: privKey,
+		DHTMode:    "off",
+	})
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, cl.Close())
+	}()
+
+	c := cl.(*client)
+	c.peerDiscoveryTimeout = 50 * time.Millisecond
+
+	const topic = "discovery-leak"
+	require.NotNil(t, cl.Subscribe(topic))
+	require.Eventually(t, func() bool {
+		c.mu.RLock()
+		defer c.mu.RUnlock()
+		_, ok := c.topics[topic]
+		return ok
+	}, time.Second, 10*time.Millisecond)
+
+	const rounds = 15
+	baseline := runtime.NumGoroutine()
+	finders := make([]*blockingContentRouting, rounds)
+	for i := range finders {
+		finders[i] = newBlockingContentRouting()
+		c.findAndConnectPeers(c.ctx, drouting.NewRoutingDiscovery(finders[i]))
+	}
+
+	deadline := time.After(2 * time.Second)
+	for i, finder := range finders {
+		select {
+		case <-finder.exited:
+		case <-deadline:
+			t.Fatalf("lookup %d still running after the reader stopped (%d goroutines)", i, runtime.NumGoroutine())
+		}
+	}
+
+	// A leaked lookup keeps one goroutine per round. Background libp2p work can
+	// add a couple, but not one per discovery round.
+	require.Eventually(t, func() bool {
+		return goroutinesContaining("blockingContentRouting.FindProvidersAsync") == 0 &&
+			runtime.NumGoroutine() <= baseline+5
+	}, time.Second, 10*time.Millisecond)
+	require.NoError(t, c.ctx.Err())
+}
+
+// TestFindAndConnectPeersCancelsLookupWhenChannelCloses verifies that the
+// lookup context is cancelled when the provider channel is closed before the
+// read deadline. That is the path where the DHT lookup finishes on its own.
+func TestFindAndConnectPeersCancelsLookupWhenChannelCloses(t *testing.T) {
+	privKey, err := GeneratePrivateKey()
+	require.NoError(t, err)
+
+	cl, err := NewClient(Config{
+		Name:       testPeerName,
+		PrivateKey: privKey,
+		DHTMode:    "off",
+	})
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, cl.Close())
+	}()
+
+	c := cl.(*client)
+	c.peerDiscoveryTimeout = time.Hour
+
+	const topic = "discovery-drain"
+	require.NotNil(t, cl.Subscribe(topic))
+	require.Eventually(t, func() bool {
+		c.mu.RLock()
+		defer c.mu.RUnlock()
+		_, ok := c.topics[topic]
+		return ok
+	}, time.Second, 10*time.Millisecond)
+
+	finder := newClosingContentRouting()
+	c.findAndConnectPeers(c.ctx, drouting.NewRoutingDiscovery(finder))
+
+	select {
+	case <-finder.cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("lookup context was not cancelled after the provider channel closed")
+	}
+	require.ErrorIs(t, finder.lookupErr, context.Canceled)
+	require.NoError(t, c.ctx.Err())
 }
