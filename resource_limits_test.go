@@ -71,13 +71,25 @@ func identifyServiceLimit(t *testing.T, c *client) rcmgr.Limit {
 	return limit
 }
 
+// lowerInbound returns an inbound connection limit below the auto-scaled
+// total, so it is valid without also setting Conns.
+func lowerInbound(t *testing.T) int {
+	t.Helper()
+
+	total := autoScaledDefaults().ToPartialLimitConfig().System.Conns.Build(0)
+	require.Greater(t, total, 10)
+
+	return total - 7
+}
+
 func TestResourceLimitsSystemOverrideApplied(t *testing.T) {
-	c := newLimitsTestClient(t, ResourceLimits{ConnsInbound: 1234})
+	inbound := lowerInbound(t)
+	c := newLimitsTestClient(t, ResourceLimits{ConnsInbound: inbound})
 
 	defaults := autoScaledDefaults()
 	limit := systemLimit(t, c)
 
-	assert.Equal(t, 1234, limit.GetConnLimit(network.DirInbound))
+	assert.Equal(t, inbound, limit.GetConnLimit(network.DirInbound))
 	// Fields left unset keep the auto-scaled defaults.
 	assert.Equal(t, defaults.ToPartialLimitConfig().System.ConnsOutbound.Build(0), limit.GetConnLimit(network.DirOutbound))
 	assert.Equal(t, defaults.ToPartialLimitConfig().System.Conns.Build(0), limit.GetConnTotalLimit())
@@ -157,10 +169,22 @@ func TestResourceLimitsSubnetOverrideApplied(t *testing.T) {
 }
 
 func TestResourceLimitsSubnetDefaultsWhenUnset(t *testing.T) {
-	c := newLimitsTestClient(t, ResourceLimits{ConnsInbound: 1000})
+	for _, tt := range []struct {
+		name   string
+		limits ResourceLimits
+	}{
+		{name: "nil", limits: ResourceLimits{Conns: 1000}},
+		{name: "empty", limits: ResourceLimits{Conns: 1000, IPv4SubnetLimits: []SubnetConnLimit{}, IPv6SubnetLimits: []SubnetConnLimit{}}},
+		{name: "only empty", limits: ResourceLimits{IPv4SubnetLimits: []SubnetConnLimit{}, IPv6SubnetLimits: []SubnetConnLimit{}}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			rm := newLimitsTestClient(t, tt.limits).host.Network().ResourceManager()
 
-	// go-libp2p's default IPv4 limit is 8 connections per address.
-	assert.Equal(t, 8, openInbound(t, c.host.Network().ResourceManager(), "/ip4/203.0.113.8/tcp/4001", 12))
+			// go-libp2p's defaults: 8 connections per IPv4 address, 8 per IPv6 /56.
+			assert.Equal(t, 8, openInbound(t, rm, "/ip4/203.0.113.8/tcp/4001", 12))
+			assert.Equal(t, 8, openInbound(t, rm, "/ip6/2001:db8::8/tcp/4001", 12))
+		})
+	}
 }
 
 func TestResourceLimitsInvalidRejected(t *testing.T) {
@@ -172,6 +196,20 @@ func TestResourceLimitsInvalidRejected(t *testing.T) {
 		{name: "negative system field", limits: ResourceLimits{ConnsInbound: -1}},
 		{name: "negative peer field", limits: ResourceLimits{PeerStreamsInbound: -5}},
 		{name: "inbound above total", limits: ResourceLimits{Conns: 100, ConnsInbound: 200}},
+		{
+			// An unset total is the auto-scaled one; rcmgr would silently cap
+			// inbound at it.
+			name:   "inbound above auto-scaled total",
+			limits: ResourceLimits{ConnsInbound: autoScaledDefaults().ToPartialLimitConfig().System.Conns.Build(0) + 1},
+		},
+		{
+			name:   "inbound streams above auto-scaled total",
+			limits: ResourceLimits{StreamsInbound: autoScaledDefaults().ToPartialLimitConfig().System.Streams.Build(0) + 1},
+		},
+		{
+			name:   "peer inbound above auto-scaled peer total",
+			limits: ResourceLimits{PeerConnsInbound: autoScaledDefaults().ToPartialLimitConfig().PeerDefault.Conns.Build(0) + 1},
+		},
 		{name: "outbound above total", limits: ResourceLimits{Conns: 100, ConnsOutbound: 101}},
 		{name: "inbound streams above total", limits: ResourceLimits{Streams: 10, StreamsInbound: 11}},
 		{name: "peer inbound above peer total", limits: ResourceLimits{PeerConns: 2, PeerConnsInbound: 3}},
@@ -233,7 +271,7 @@ func TestResourceLimitsLoggedAtStartup(t *testing.T) {
 		limits ResourceLimits
 		want   string
 	}{
-		{name: "overridden", limits: ResourceLimits{ConnsInbound: 4321}, want: "inbound=4321 "},
+		{name: "overridden", limits: ResourceLimits{Conns: 8000, ConnsInbound: 4321}, want: "conns=8000 inbound=4321 "},
 		{
 			name: "auto-scaled",
 			want: fmt.Sprintf("inbound=%d ", autoScaledDefaults().ToPartialLimitConfig().System.ConnsInbound.Build(0)),
@@ -269,8 +307,11 @@ func TestResourceLimitsLoggedAtStartup(t *testing.T) {
 	}
 }
 
+// TestResourceLimitsReportedToPrometheus reads the process-global
+// libp2p_rcmgr_limit gauge, which every new resource manager overwrites. It
+// relies on no test in this package running in parallel.
 func TestResourceLimitsReportedToPrometheus(t *testing.T) {
-	newLimitsTestClient(t, ResourceLimits{ConnsInbound: 2345})
+	newLimitsTestClient(t, ResourceLimits{Conns: 5000, ConnsInbound: 2345})
 
 	families, err := prometheus.DefaultGatherer.Gather()
 	require.NoError(t, err)

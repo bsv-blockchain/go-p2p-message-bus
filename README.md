@@ -276,7 +276,7 @@ client, err := p2p.NewClient(p2p.Config{
         Conns:        8192, // system-wide, inbound + outbound; must be >= MaxConnections
         ConnsInbound: 4096,
         FD:           8192,
-        // Optional per-subnet caps; each list replaces go-libp2p's default for that family.
+        // Optional per-subnet caps; a non-empty list replaces go-libp2p's default for that family.
         IPv4SubnetLimits: []p2p.SubnetConnLimit{{PrefixLength: 32, Conns: 8}, {PrefixLength: 24, Conns: 32}},
     },
 })
@@ -291,9 +291,10 @@ client, err := p2p.NewClient(p2p.Config{
 | `IPv4SubnetLimits` | each IPv4 subnet | 8 connections per address (/32) |
 | `IPv6SubnetLimits` | each IPv6 subnet | 8 per /56, 64 per /48 |
 
-- Zero (or nil) keeps the go-libp2p default for that field; a zero `ResourceLimits` leaves the resource manager entirely to go-libp2p, as before
+- Zero (or an empty list) keeps the go-libp2p default for that field; a zero `ResourceLimits` leaves the resource manager entirely to go-libp2p, as before
 - Overrides apply on top of the auto-scaled defaults, so setting one field never changes another (raising `Conns` does not raise `ConnsOutbound`)
-- `NewClient` rejects negative values, an inbound/outbound part larger than its total (`ConnsInbound > Conns`, `StreamsInbound > Streams`, `PeerConnsInbound > PeerConns`, ...), `Conns` below `MaxConnections`, and subnet entries with an out-of-range prefix or a non-positive count
+- An inbound or outbound limit can't exceed its total, whether the total is set or auto-scaled: raising `ConnsInbound` above the auto-scaled `Conns` needs `Conns` set too, otherwise libp2p would silently cap it
+- `NewClient` rejects negative values, an inbound/outbound part larger than its effective total (`ConnsInbound > Conns`, `StreamsInbound > Streams`, `PeerConnsInbound > PeerConns`, ...), `Conns` below `MaxConnections`, and subnet entries with an out-of-range prefix or a non-positive count
 - The effective system limits are logged once at startup: `Resource manager system limits: conns=... inbound=... outbound=... streams=... fd=... memory=...`
 - The `libp2p_rcmgr_*` Prometheus metrics keep working and report the effective limits
 

@@ -11,14 +11,17 @@ import (
 
 // ResourceLimits overrides limits of the libp2p resource manager.
 //
-// Every field is optional. A zero value (or nil slice) keeps the go-libp2p
+// Every field is optional. A zero value (or empty slice) keeps the go-libp2p
 // default for that limit, which is auto-scaled to the host's memory and
 // file-descriptor limits. A zero ResourceLimits leaves the resource manager
 // entirely to go-libp2p, exactly as before this option existed. Negative values
 // are rejected.
 //
 // Overrides are applied on top of the auto-scaled defaults, so setting one
-// field never changes the others. The resource manager's Prometheus metrics
+// field never changes the others. An inbound or outbound limit must not exceed
+// its total, whether that total is set here or left at its auto-scaled
+// default: raising ConnsInbound above the auto-scaled Conns needs Conns set
+// too, or NewClient fails. The resource manager's Prometheus metrics
 // (libp2p_rcmgr_*) report the effective limits either way.
 type ResourceLimits struct {
 	// Conns is the system-wide limit on open connections, inbound and outbound
@@ -28,11 +31,11 @@ type ResourceLimits struct {
 
 	// ConnsInbound is the system-wide limit on inbound connections. Raise it on
 	// nodes that accept heavy inbound churn, such as bootstrap or DHT server
-	// nodes. Must not exceed Conns when both are set.
+	// nodes. Must not exceed Conns (set or auto-scaled).
 	ConnsInbound int
 
 	// ConnsOutbound is the system-wide limit on outbound connections. Must not
-	// exceed Conns when both are set.
+	// exceed Conns (set or auto-scaled).
 	ConnsOutbound int
 
 	// Streams is the system-wide limit on open streams, inbound and outbound
@@ -40,11 +43,11 @@ type ResourceLimits struct {
 	Streams int
 
 	// StreamsInbound is the system-wide limit on inbound streams. Must not
-	// exceed Streams when both are set.
+	// exceed Streams (set or auto-scaled).
 	StreamsInbound int
 
 	// StreamsOutbound is the system-wide limit on outbound streams. Must not
-	// exceed Streams when both are set.
+	// exceed Streams (set or auto-scaled).
 	StreamsOutbound int
 
 	// FD is the system-wide limit on file descriptors used for connections.
@@ -54,19 +57,19 @@ type ResourceLimits struct {
 	PeerConns int
 
 	// PeerConnsInbound is the limit on inbound connections from any single
-	// peer. Must not exceed PeerConns when both are set.
+	// peer. Must not exceed PeerConns (set or auto-scaled).
 	PeerConnsInbound int
 
 	// PeerStreamsInbound is the limit on inbound streams from any single peer.
 	PeerStreamsInbound int
 
 	// IPv4SubnetLimits caps connections per IPv4 subnet, matched by source
-	// address. When set it replaces the go-libp2p default (8 connections per
+	// address. When non-empty it replaces the go-libp2p default (8 connections per
 	// /32, i.e. per IP address) as a whole, so include every prefix you want
 	// limited. Loopback stays unlimited.
 	IPv4SubnetLimits []SubnetConnLimit
 
-	// IPv6SubnetLimits caps connections per IPv6 subnet. When set it replaces
+	// IPv6SubnetLimits caps connections per IPv6 subnet. When non-empty it replaces
 	// the go-libp2p defaults (8 per /56 and 64 per /48) as a whole.
 	IPv6SubnetLimits []SubnetConnLimit
 }
@@ -110,7 +113,7 @@ func (l ResourceLimits) counts() []namedLimit {
 
 // isZero reports whether no limit has been overridden.
 func (l ResourceLimits) isZero() bool {
-	if l.IPv4SubnetLimits != nil || l.IPv6SubnetLimits != nil {
+	if len(l.IPv4SubnetLimits) > 0 || len(l.IPv6SubnetLimits) > 0 {
 		return false
 	}
 	for _, f := range l.counts() {
@@ -128,22 +131,6 @@ func (l ResourceLimits) validate(maxConns int) error {
 	for _, f := range l.counts() {
 		if f.value < 0 {
 			return fmt.Errorf("%w: %s must not be negative, got %d", errInvalidResourceLimits, f.name, f.value)
-		}
-	}
-
-	pairs := []struct {
-		part, total         string
-		partValue, totalVal int
-	}{
-		{"ConnsInbound", "Conns", l.ConnsInbound, l.Conns},
-		{"ConnsOutbound", "Conns", l.ConnsOutbound, l.Conns},
-		{"StreamsInbound", "Streams", l.StreamsInbound, l.Streams},
-		{"StreamsOutbound", "Streams", l.StreamsOutbound, l.Streams},
-		{"PeerConnsInbound", "PeerConns", l.PeerConnsInbound, l.PeerConns},
-	}
-	for _, p := range pairs {
-		if p.partValue > 0 && p.totalVal > 0 && p.partValue > p.totalVal {
-			return fmt.Errorf("%w: %s (%d) exceeds %s (%d)", errInvalidResourceLimits, p.part, p.partValue, p.total, p.totalVal)
 		}
 	}
 
@@ -184,6 +171,44 @@ func resourceManagerOptions(l ResourceLimits, maxConns int) ([]libp2p.Option, er
 	return []libp2p.Option{libp2p.ResourceManager(mgr)}, nil
 }
 
+// checkDirectionalLimits rejects an inbound or outbound limit above its total.
+// The total is either overridden too or the auto-scaled default; rcmgr checks
+// both, so a larger directional limit would be capped at the total silently.
+func checkDirectionalLimits(l ResourceLimits, effective rcmgr.ConcreteLimitConfig) error {
+	partial := effective.ToPartialLimitConfig()
+	sys, peerDefault := partial.System, partial.PeerDefault
+
+	pairs := []struct {
+		part, total       string
+		partSet, totalSet bool
+		partVal, totalVal rcmgr.LimitVal
+	}{
+		{"ConnsInbound", "Conns", l.ConnsInbound > 0, l.Conns > 0, sys.ConnsInbound, sys.Conns},
+		{"ConnsOutbound", "Conns", l.ConnsOutbound > 0, l.Conns > 0, sys.ConnsOutbound, sys.Conns},
+		{"StreamsInbound", "Streams", l.StreamsInbound > 0, l.Streams > 0, sys.StreamsInbound, sys.Streams},
+		{"StreamsOutbound", "Streams", l.StreamsOutbound > 0, l.Streams > 0, sys.StreamsOutbound, sys.Streams},
+		{"PeerConnsInbound", "PeerConns", l.PeerConnsInbound > 0, l.PeerConns > 0, peerDefault.ConnsInbound, peerDefault.Conns},
+	}
+	for _, p := range pairs {
+		if !p.partSet && !p.totalSet {
+			continue // both go-libp2p defaults
+		}
+
+		part, total := p.partVal.Build(0), p.totalVal.Build(0)
+		if part <= total {
+			continue
+		}
+		if p.totalSet {
+			return fmt.Errorf("%w: %s (%d) exceeds %s (%d)", errInvalidResourceLimits, p.part, part, p.total, total)
+		}
+
+		return fmt.Errorf("%w: %s (%d) exceeds the auto-scaled %s (%d); set %s as well",
+			errInvalidResourceLimits, p.part, part, p.total, total, p.total)
+	}
+
+	return nil
+}
+
 // buildResourceManager returns a resource manager with the overrides applied
 // on top of the same auto-scaled defaults go-libp2p would otherwise use. It
 // returns nil when nothing is overridden, so that go-libp2p builds its own
@@ -220,9 +245,14 @@ func buildResourceManager(l ResourceLimits, maxConns int) (network.ResourceManag
 		},
 	}
 
-	limiter := rcmgr.NewFixedLimiter(overrides.Build(defaults.AutoScale()))
+	effective := overrides.Build(defaults.AutoScale())
+	if err := checkDirectionalLimits(l, effective); err != nil {
+		return nil, err
+	}
 
-	// A nil slice leaves that address family's go-libp2p default in place.
+	limiter := rcmgr.NewFixedLimiter(effective)
+
+	// A nil result leaves that address family's go-libp2p default in place.
 	opts := []rcmgr.Option{
 		rcmgr.WithLimitPerSubnet(toConnLimitPerSubnet(l.IPv4SubnetLimits), toConnLimitPerSubnet(l.IPv6SubnetLimits)),
 	}
@@ -236,8 +266,8 @@ func buildResourceManager(l ResourceLimits, maxConns int) (network.ResourceManag
 }
 
 func toConnLimitPerSubnet(limits []SubnetConnLimit) []rcmgr.ConnLimitPerSubnet {
-	if limits == nil {
-		return nil
+	if len(limits) == 0 {
+		return nil // keep go-libp2p's default for this address family
 	}
 
 	out := make([]rcmgr.ConnLimitPerSubnet, len(limits))
