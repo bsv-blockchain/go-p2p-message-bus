@@ -264,6 +264,39 @@ When enabled:
 - This significantly speeds up network reconnection
 - If not provided, peer caching is disabled
 
+**Resource Manager Limits:**
+
+The libp2p resource manager caps connections, streams and file descriptors. By default go-libp2p auto-scales these limits to the host's memory and file-descriptor limits, so the inbound connection limit can land in the low hundreds on a small host. Nodes that take heavy inbound churn, such as bootstrap or DHT server nodes, should set the limits explicitly with `ResourceLimits`:
+
+```go
+client, err := p2p.NewClient(p2p.Config{
+    Name:       "bootstrap1",
+    PrivateKey: privKey,
+    ResourceLimits: p2p.ResourceLimits{
+        Conns:        8192, // system-wide, inbound + outbound; must be >= MaxConnections
+        ConnsInbound: 4096,
+        FD:           8192,
+        // Optional per-subnet caps; each list replaces go-libp2p's default for that family.
+        IPv4SubnetLimits: []p2p.SubnetConnLimit{{PrefixLength: 32, Conns: 8}, {PrefixLength: 24, Conns: 32}},
+    },
+})
+```
+
+| Field | Scope | go-libp2p default when unset |
+|---|---|---|
+| `Conns`, `ConnsInbound`, `ConnsOutbound` | system | auto-scaled |
+| `Streams`, `StreamsInbound`, `StreamsOutbound` | system | auto-scaled |
+| `FD` | system | auto-scaled |
+| `PeerConns`, `PeerConnsInbound`, `PeerStreamsInbound` | each peer | auto-scaled |
+| `IPv4SubnetLimits` | each IPv4 subnet | 8 connections per address (/32) |
+| `IPv6SubnetLimits` | each IPv6 subnet | 8 per /56, 64 per /48 |
+
+- Zero (or nil) keeps the go-libp2p default for that field; a zero `ResourceLimits` leaves the resource manager entirely to go-libp2p, as before
+- Overrides apply on top of the auto-scaled defaults, so setting one field never changes another (raising `Conns` does not raise `ConnsOutbound`)
+- `NewClient` rejects negative values, an inbound/outbound part larger than its total (`ConnsInbound > Conns`, `StreamsInbound > Streams`, `PeerConnsInbound > PeerConns`, ...), `Conns` below `MaxConnections`, and subnet entries with an out-of-range prefix or a non-positive count
+- The effective system limits are logged once at startup: `Resource manager system limits: conns=... inbound=... outbound=... streams=... fd=... memory=...`
+- The `libp2p_rcmgr_*` Prometheus metrics keep working and report the effective limits
+
 **Restricting Which Peers You Accept Messages From:**
 
 The `AllowedPublisherIDs` field restricts inbound pubsub messages to a known set of publishers. It gates message authorship only — not connections, not streams, not the peer-address exchange. It is empty by default, which accepts messages from everyone:

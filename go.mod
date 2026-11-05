@@ -8,6 +8,7 @@ require (
 	github.com/libp2p/go-libp2p-pubsub v0.19.0
 	github.com/multiformats/go-multiaddr v0.16.1
 	github.com/multiformats/go-multiaddr-dns v0.6.0
+	github.com/prometheus/client_golang v1.25.0
 	github.com/stretchr/testify v1.12.1
 )
 
@@ -87,7 +88,6 @@ require (
 	github.com/pion/turn/v5 v5.1.2 // indirect
 	github.com/pion/webrtc/v4 v4.2.23 // indirect
 	github.com/polydawn/refmt v0.90.0 // indirect
-	github.com/prometheus/client_golang v1.25.0 // indirect
 	github.com/prometheus/client_model v0.6.3 // indirect
 	github.com/prometheus/common v0.72.0 // indirect
 	github.com/prometheus/procfs v0.22.0 // indirect
