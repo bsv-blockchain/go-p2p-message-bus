@@ -18,10 +18,11 @@ import (
 // are rejected.
 //
 // Overrides are applied on top of the auto-scaled defaults, so setting one
-// field never changes the others. An inbound or outbound limit must not exceed
-// its total, whether that total is set here or left at its auto-scaled
-// default: raising ConnsInbound above the auto-scaled Conns needs Conns set
-// too, or NewClient fails. The resource manager's Prometheus metrics
+// field never changes the others. An inbound or outbound limit that is set
+// must not exceed its total, whether that total is set here or left at its
+// auto-scaled default: raising ConnsInbound above the auto-scaled Conns needs
+// Conns set too, or NewClient fails. Lowering only a total is fine; the
+// directional limits are then capped at it. The resource manager's Prometheus metrics
 // (libp2p_rcmgr_*) report the effective limits either way.
 type ResourceLimits struct {
 	// Conns is the system-wide limit on open connections, inbound and outbound
@@ -31,7 +32,9 @@ type ResourceLimits struct {
 
 	// ConnsInbound is the system-wide limit on inbound connections. Raise it on
 	// nodes that accept heavy inbound churn, such as bootstrap or DHT server
-	// nodes. Must not exceed Conns (set or auto-scaled).
+	// nodes. Must not exceed Conns (set or auto-scaled). FD caps inbound
+	// connections too (each TCP connection holds a file descriptor), so raise
+	// FD together with ConnsInbound.
 	ConnsInbound int
 
 	// ConnsOutbound is the system-wide limit on outbound connections. Must not
@@ -171,9 +174,12 @@ func resourceManagerOptions(l ResourceLimits, maxConns int) ([]libp2p.Option, er
 	return []libp2p.Option{libp2p.ResourceManager(mgr)}, nil
 }
 
-// checkDirectionalLimits rejects an inbound or outbound limit above its total.
-// The total is either overridden too or the auto-scaled default; rcmgr checks
-// both, so a larger directional limit would be capped at the total silently.
+// checkDirectionalLimits rejects an explicitly set inbound or outbound limit
+// above its total, whether that total is overridden too or left at its
+// auto-scaled default: rcmgr checks both, so the larger directional limit
+// would be capped at the total silently. A directional limit left unset is
+// not checked; lowering only the total is valid, and rcmgr caps the unset
+// directional limit at it.
 func checkDirectionalLimits(l ResourceLimits, effective rcmgr.ConcreteLimitConfig) error {
 	partial := effective.ToPartialLimitConfig()
 	sys, peerDefault := partial.System, partial.PeerDefault
@@ -190,8 +196,8 @@ func checkDirectionalLimits(l ResourceLimits, effective rcmgr.ConcreteLimitConfi
 		{"PeerConnsInbound", "PeerConns", l.PeerConnsInbound > 0, l.PeerConns > 0, peerDefault.ConnsInbound, peerDefault.Conns},
 	}
 	for _, p := range pairs {
-		if !p.partSet && !p.totalSet {
-			continue // both go-libp2p defaults
+		if !p.partSet {
+			continue // rcmgr caps an unset directional limit at the total
 		}
 
 		part, total := p.partVal.Build(0), p.totalVal.Build(0)

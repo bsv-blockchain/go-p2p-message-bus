@@ -249,6 +249,94 @@ func TestResourceLimitsInvalidRejected(t *testing.T) {
 	}
 }
 
+func TestResourceLimitsLoweredTotalAlone(t *testing.T) {
+	// go-libp2p's base limits, before auto-scaling adds to them, are 64
+	// inbound connections, 64 inbound/outbound streams and 8 inbound
+	// connections per peer. Each total here sits below its unset directional
+	// part on every host, so rcmgr caps that part at the total at runtime.
+	tests := []struct {
+		name  string
+		limit ResourceLimits
+		total func(sys, peer rcmgr.Limit) int
+		want  int
+	}{
+		{
+			name:  "Conns",
+			limit: ResourceLimits{Conns: 35}, // the lowest MaxConnections allows by default
+			total: func(sys, _ rcmgr.Limit) int { return sys.GetConnTotalLimit() },
+			want:  35,
+		},
+		{
+			name:  "Streams",
+			limit: ResourceLimits{Streams: 1},
+			total: func(sys, _ rcmgr.Limit) int { return sys.GetStreamTotalLimit() },
+			want:  1,
+		},
+		{
+			name:  "PeerConns",
+			limit: ResourceLimits{PeerConns: 1},
+			total: func(_, peer rcmgr.Limit) int { return peer.GetConnTotalLimit() },
+			want:  1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := newLimitsTestClient(t, tt.limit)
+
+			other, err := GeneratePrivateKey()
+			require.NoError(t, err)
+			otherID, err := peer.IDFromPrivateKey(other)
+			require.NoError(t, err)
+
+			var peerLimit rcmgr.Limit
+			err = c.host.Network().ResourceManager().ViewPeer(otherID, func(s network.PeerScope) error {
+				peerLimit = s.(rcmgr.ResourceScopeLimiter).Limit()
+				return nil
+			})
+			require.NoError(t, err)
+
+			assert.Equal(t, tt.want, tt.total(systemLimit(t, c), peerLimit))
+		})
+	}
+}
+
+func TestResourceLimitsLoweredTotalCapsDirectional(t *testing.T) {
+	other, err := GeneratePrivateKey()
+	require.NoError(t, err)
+	otherID, err := peer.IDFromPrivateKey(other)
+	require.NoError(t, err)
+
+	t.Run("Streams", func(t *testing.T) {
+		rm := newLimitsTestClient(t, ResourceLimits{Streams: 1}).host.Network().ResourceManager()
+
+		first, err := rm.OpenStream(otherID, network.DirInbound)
+		require.NoError(t, err)
+		t.Cleanup(first.Done)
+
+		// StreamsInbound is unset and auto-scaled far above 1; the total caps it.
+		_, err = rm.OpenStream(otherID, network.DirInbound)
+		require.Error(t, err)
+	})
+
+	t.Run("PeerConns", func(t *testing.T) {
+		rm := newLimitsTestClient(t, ResourceLimits{PeerConns: 1}).host.Network().ResourceManager()
+		maddr, err := multiaddr.NewMultiaddr("/ip4/203.0.113.9/tcp/4001")
+		require.NoError(t, err)
+
+		first, err := rm.OpenConnection(network.DirInbound, true, maddr)
+		require.NoError(t, err)
+		t.Cleanup(first.Done)
+		require.NoError(t, first.SetPeer(otherID))
+
+		// PeerConnsInbound is unset (8 by default); PeerConns caps it at 1.
+		second, err := rm.OpenConnection(network.DirInbound, true, maddr)
+		require.NoError(t, err)
+		t.Cleanup(second.Done)
+		require.Error(t, second.SetPeer(otherID))
+	})
+}
+
 func TestResourceLimitsValidBoundariesAccepted(t *testing.T) {
 	// Conns equal to MaxConnections, parts equal to their totals, and the
 	// widest legal prefixes are all valid.
