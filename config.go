@@ -260,6 +260,15 @@ type Config struct {
 	// If not provided or zero, defaults to 20 seconds.
 	ConnectionGracePeriod time.Duration
 
+	// ResourceLimits optionally overrides the libp2p resource manager's limits:
+	// system-wide connection, stream and file-descriptor caps, per-peer caps,
+	// and per-subnet connection caps. Unset fields keep go-libp2p's defaults,
+	// which are auto-scaled to the host's memory and file-descriptor limits and
+	// can be low on small hosts. Nodes that take heavy inbound churn, such as
+	// bootstrap or DHT server nodes, should set ConnsInbound explicitly.
+	// The effective system limits are logged at startup. See ResourceLimits.
+	ResourceLimits ResourceLimits
+
 	// EnablePeerScoring turns on GossipSub peer scoring using the library's built-in
 	// defaults (DefaultPeerScoreParams / DefaultPeerScoreThresholds). Peer scoring is
 	// what protects the mesh from Sybil peers: it applies an IP-colocation penalty and

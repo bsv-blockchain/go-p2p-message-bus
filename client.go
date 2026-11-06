@@ -402,18 +402,7 @@ func buildHostOptions(config Config, log logger, cancel context.CancelFunc) ([]l
 	log.Infof("Configured TCP-only transport (WebRTC disabled to prevent mDNS)")
 
 	// Configure connection manager to limit total connections
-	maxConns := config.MaxConnections
-	if maxConns == 0 {
-		maxConns = 35 // Default high water mark
-	}
-	minConns := config.MinConnections
-	if minConns == 0 {
-		minConns = 25 // Default low water mark
-	}
-	gracePeriod := config.ConnectionGracePeriod
-	if gracePeriod == 0 {
-		gracePeriod = 20 * time.Second // Default grace period
-	}
+	minConns, maxConns, gracePeriod := connManagerSettings(config)
 
 	connMgr, err := connmgr.NewConnManager(
 		minConns,
@@ -457,7 +446,34 @@ func buildHostOptions(config Config, log logger, cancel context.CancelFunc) ([]l
 		log.Infof("Using custom announce addresses: %v", config.AnnounceAddrs)
 	}
 
-	return hostOpts, nil
+	// Built last: the resource manager starts a background goroutine, so no
+	// error return may follow it here. No options means go-libp2p's default.
+	rcmgrOpts, rcmgrErr := resourceManagerOptions(config.ResourceLimits, maxConns)
+	if rcmgrErr != nil {
+		cancel()
+		return nil, rcmgrErr
+	}
+
+	return append(hostOpts, rcmgrOpts...), nil
+}
+
+// connManagerSettings returns the connection manager's low and high water
+// marks and grace period, with defaults applied for unset values.
+func connManagerSettings(config Config) (minConns, maxConns int, gracePeriod time.Duration) {
+	maxConns = config.MaxConnections
+	if maxConns == 0 {
+		maxConns = 35 // Default high water mark
+	}
+	minConns = config.MinConnections
+	if minConns == 0 {
+		minConns = 25 // Default low water mark
+	}
+	gracePeriod = config.ConnectionGracePeriod
+	if gracePeriod == 0 {
+		gracePeriod = 20 * time.Second // Default grace period
+	}
+
+	return minConns, maxConns, gracePeriod
 }
 
 func createHost(_ context.Context, hostOpts []libp2p.Option, config Config, relayPeers []peer.AddrInfo, log logger, cancel context.CancelFunc) (host.Host, error) {
@@ -501,6 +517,7 @@ func createHost(_ context.Context, hostOpts []libp2p.Option, config Config, rela
 
 	log.Infof("P2P Client created. ID: %s", h.ID())
 	log.Infof("Listening on: %v", h.Addrs())
+	logSystemLimits(h.Network().ResourceManager(), log)
 	return h, nil
 }
 
