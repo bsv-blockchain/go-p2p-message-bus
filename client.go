@@ -56,6 +56,12 @@ const (
 	// connection, and a requester wedges on a peer that never answers.
 	peerAddressStreamTimeout = 10 * time.Second
 
+	// defaultPeerDiscoveryTimeout bounds one DHT FindPeers call and the read of
+	// its result channel. The lookup context is cancelled with the reader so a
+	// provider found later cannot block a kad-dht query goroutine forever on the
+	// unbuffered provider channel.
+	defaultPeerDiscoveryTimeout = 10 * time.Second
+
 	// maxPeerIDRequestBytes bounds the encoded peer ID a requester may send.
 	// Encoded peer IDs are well under 128 bytes.
 	maxPeerIDRequestBytes = 128
@@ -124,6 +130,9 @@ type client struct {
 	logger           logger
 	routingDiscovery *drouting.RoutingDiscovery
 	discoverNow      chan struct{}
+	// peerDiscoveryTimeout bounds one DHT peer lookup and the read of its result
+	// channel. Defaults to defaultPeerDiscoveryTimeout; tests shorten it.
+	peerDiscoveryTimeout time.Duration
 
 	// peerAddrStreamTimeout is the per-stream deadline for the peer-address
 	// exchange. Defaults to peerAddressStreamTimeout; tests shorten it.
@@ -228,19 +237,20 @@ func NewClient(config Config) (Client, error) {
 	}
 
 	c := &client{
-		config:           config,
-		host:             h,
-		dht:              kadDHT,
-		pubsub:           ps,
-		topics:           make(map[string]*pubsub.Topic),
-		subs:             make(map[string]*pubsub.Subscription),
-		peerTracker:      newPeerTracker(),
-		ctx:              ctx,
-		cancel:           cancel,
-		mdnsService:      mdnsService,
-		logger:           clientLogger,
-		routingDiscovery: routingDiscovery,
-		discoverNow:      make(chan struct{}, 1),
+		config:               config,
+		host:                 h,
+		dht:                  kadDHT,
+		pubsub:               ps,
+		topics:               make(map[string]*pubsub.Topic),
+		subs:                 make(map[string]*pubsub.Subscription),
+		peerTracker:          newPeerTracker(),
+		ctx:                  ctx,
+		cancel:               cancel,
+		mdnsService:          mdnsService,
+		logger:               clientLogger,
+		routingDiscovery:     routingDiscovery,
+		discoverNow:          make(chan struct{}, 1),
+		peerDiscoveryTimeout: defaultPeerDiscoveryTimeout,
 
 		peerAddrStreamTimeout: streamTimeout,
 		peerAddrLimiter:       newPeerAddressLimiter(),
@@ -1024,19 +1034,35 @@ func (c *client) findAndConnectPeers(ctx context.Context, routingDiscovery *drou
 	}
 	c.mu.RUnlock()
 
+	timeout := c.peerDiscoveryTimeout
+	if timeout <= 0 {
+		timeout = defaultPeerDiscoveryTimeout
+	}
+
 	for _, topic := range topicsCopy {
-		peerChan, err := routingDiscovery.FindPeers(ctx, topic)
+		// kad-dht FindProvidersAsync sends on an unbuffered channel and only
+		// abandons that send when ctx is done. The reader gives up at timeout,
+		// so the lookup has to share that deadline and be cancelled when the
+		// reader returns (including when the channel is closed early). Otherwise
+		// a provider found afterwards blocks the query goroutine for the life of
+		// the client. connectToDiscoveredPeer still uses the parent ctx, so a
+		// dial already in progress is not cut off at this deadline.
+		discCtx, cancel := context.WithTimeout(ctx, timeout)
+		peerChan, err := routingDiscovery.FindPeers(discCtx, topic)
 		if err != nil {
+			cancel()
 			continue
 		}
-		go c.processPeerDiscovery(ctx, peerChan)
+		go func(discCtx context.Context, cancel context.CancelFunc, peerChan <-chan peer.AddrInfo) {
+			defer cancel()
+			c.processPeerDiscovery(ctx, discCtx, peerChan)
+		}(discCtx, cancel, peerChan)
 	}
 }
 
-func (c *client) processPeerDiscovery(ctx context.Context, peerChan <-chan peer.AddrInfo) {
-	discCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
+// processPeerDiscovery reads discovered peers until discCtx ends or peerChan
+// closes. ctx is the client context and is used for dials.
+func (c *client) processPeerDiscovery(ctx, discCtx context.Context, peerChan <-chan peer.AddrInfo) {
 	for {
 		select {
 		case <-discCtx.Done():
