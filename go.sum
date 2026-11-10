@@ -224,8 +224,8 @@ github.com/stretchr/objx v0.1.0/go.mod h1:HFkY916IF+rwdDfMAkV7OtwuqBVzrE8GR6GFx+
 github.com/stretchr/testify v1.4.0/go.mod h1:j7eGeouHqKxXV5pUuKE4zz7dFj8WfuZ+81PSLYec5m4=
 github.com/stretchr/testify v1.12.1 h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWDWE=
 github.com/stretchr/testify v1.12.1/go.mod h1:MDEgiDPPsNp5cuIrHPPCyornHKgEVbtFUmoNlxoYthg=
-github.com/teracoder/go-libp2p-pubsub v0.0.0-20261028140932-1ec8b8df6b30 h1:nEpCtoLl+/bqPKPpJDR1FNDIsyPbVG+bm0tSClpZrEE=
-github.com/teracoder/go-libp2p-pubsub v0.0.0-20261028140932-1ec8b8df6b30/go.mod h1:BfhG/m4TM39nKlcW6myqsoUjsJhOPpSLBCo4OtHLweI=
+github.com/teracoder/go-libp2p-pubsub v0.0.0-20261110135644-add31e1d977f h1:sWg8+eKZ+2a+NZxXEBNJcm7aUV6K/7C9BYrTXoYDMNs=
+github.com/teracoder/go-libp2p-pubsub v0.0.0-20261110135644-add31e1d977f/go.mod h1:BfhG/m4TM39nKlcW6myqsoUjsJhOPpSLBCo4OtHLweI=
 github.com/whyrusleeping/go-keyspace v0.0.0-20160322163242-5b898ac5add1 h1:EKhdznlJHPMoKr0XTrX+IlJs1LH3lyx2nfr1dOlZ79k=
 github.com/whyrusleeping/go-keyspace v0.0.0-20160322163242-5b898ac5add1/go.mod h1:8UvriyWtv5Q5EOgjHaSseUEdkQfvwFv1I/In/O2M9gc=
 github.com/wlynxg/anet v0.0.5 h1:J3VJGi1gvo0JwZ/P1/Yc/8p63SoW98B5dHkYDmpgvvU=

@@ -131,4 +131,4 @@ replace google.golang.org/grpc v1.78.0 => google.golang.org/grpc v1.79.3
 // connection to it closes (fixed-identity rolling restarts). Review:
 // https://github.com/bsv-blockchain/go-libp2p-pubsub/pull/1. Consumers must add
 // the same replace (it does not propagate); drop it once upstream releases the fix.
-replace github.com/libp2p/go-libp2p-pubsub => github.com/teracoder/go-libp2p-pubsub v0.0.0-20261028140932-1ec8b8df6b30
+replace github.com/libp2p/go-libp2p-pubsub => github.com/teracoder/go-libp2p-pubsub v0.0.0-20261110135644-add31e1d977f
