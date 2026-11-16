@@ -66,7 +66,8 @@ type Config struct {
 	Port int
 
 	// PeerCacheTTL is the duration after which unseen peers are removed from the cache.
-	// Peers not seen for longer than this duration will be evicted on next cache load.
+	// Peers not seen for longer than this duration are dropped when the cache is
+	// loaded or saved.
 	// If not provided or zero, defaults to 24 hours (same as go-ethereum).
 	// Set to a negative value to disable TTL-based eviction.
 	PeerCacheTTL time.Duration

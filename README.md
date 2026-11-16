@@ -259,7 +259,9 @@ client, err := p2p.NewPeer(p2p.Config{
 ```
 
 When enabled:
-- Connected peers are automatically saved to the specified file
+- Connected topic peers are saved to the specified file, at most once every 30 seconds
+- Each save merges into the existing file: peers not connected right now are kept until they are older than `PeerCacheTTL` (default 24h), and the newest 1,000 peers are kept
+- The file is replaced atomically, and once more on `Close`
 - On restart, the client will reconnect to previously known peers
 - This significantly speeds up network reconnection
 - If not provided, peer caching is disabled
@@ -403,7 +405,7 @@ Publishes a message to a topic. The message is broadcast to all peers subscribed
 func (c *Client) GetPeers() []PeerInfo
 ```
 
-Returns information about all known peers on subscribed topics.
+Returns the peers that authored a message on a joined topic and are connected now or were heard from within the last hour. At most 10,000 such authors are tracked; connected ones are always kept.
 
 **GetID**
 

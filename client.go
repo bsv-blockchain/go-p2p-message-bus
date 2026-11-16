@@ -839,7 +839,8 @@ func (c *client) Publish(ctx context.Context, topic string, data []byte) error {
 	return t.Publish(ctx, msgBytes)
 }
 
-// GetPeers returns information about all known peers on subscribed topics.
+// GetPeers returns the tracked authors of messages on joined topics; see
+// Client.GetPeers.
 func (c *client) GetPeers() []PeerInfo {
 	allTopicPeers := c.peerTracker.getAllTopicPeers()
 	peers := make([]PeerInfo, 0, len(allTopicPeers))

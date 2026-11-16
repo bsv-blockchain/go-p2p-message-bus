@@ -22,7 +22,9 @@ type Client interface {
 	// Publish publishes a message to the specified topic.
 	Publish(ctx context.Context, topic string, data []byte) error
 
-	// GetPeers returns information about all known peers on subscribed topics.
+	// GetPeers returns the peers that authored a message on a joined topic and
+	// are connected now or were heard from within the last hour. At most 10,000
+	// such authors are tracked; connected ones are always kept.
 	GetPeers() []PeerInfo
 
 	// GetID returns this peer's ID as a string.
