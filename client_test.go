@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/multiformats/go-multiaddr"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -830,4 +832,65 @@ func FuzzMessageUnmarshal(f *testing.F) {
 
 		validateMessageRoundTrip(t, m, m2)
 	})
+}
+
+// newTopicPeers starts two DHT-off clients subscribed to topics, with b
+// logging to the returned logger, and opens a single loopback TCP connection
+// from b to a only after both have subscribed.
+func newTopicPeers(t *testing.T, topics ...string) (a, b *client, bLog *captureLogger) {
+	t.Helper()
+	bLog = &captureLogger{}
+	newClient := func(cfg Config) *client {
+		privKey, err := GeneratePrivateKey()
+		require.NoError(t, err)
+		cfg.PrivateKey = privKey
+		cfg.AllowPrivateIPs = true
+		cfg.DHTMode = "off"
+		cl, err := NewClient(cfg)
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, cl.Close()) })
+		return cl.(*client)
+	}
+	a = newClient(Config{Name: "peer-a"})
+	b = newClient(Config{Name: "peer-b", Logger: bLog})
+	for _, topic := range topics {
+		a.Subscribe(topic)
+		b.Subscribe(topic)
+	}
+
+	var tcpLoopback []multiaddr.Multiaddr
+	for _, addr := range a.host.Addrs() {
+		if strings.HasPrefix(addr.String(), "/ip4/127.0.0.1/tcp/") {
+			tcpLoopback = append(tcpLoopback, addr)
+		}
+	}
+	require.Len(t, tcpLoopback, 1)
+
+	ctx, cancel := context.WithTimeout(context.Background(), eventuallyTimeout)
+	defer cancel()
+	require.NoError(t, b.host.Connect(ctx, peer.AddrInfo{ID: a.host.ID(), Addrs: tcpLoopback}))
+	return a, b, bLog
+}
+
+// A connection to a peer sharing several topics is handled once, not once per
+// subscribed topic.
+func TestTopicPeerConnectionHandledOncePerConnection(t *testing.T) {
+	_, _, bLog := newTopicPeers(t, "t1", "t2", "t3", "t4")
+
+	connected := func() int { return strings.Count(bLog.String(), "[CONNECTED] Topic peer") }
+	require.Eventually(t, func() bool { return connected() >= 1 }, eventuallyTimeout, eventuallyTick)
+	require.Never(t, func() bool { return connected() > 1 }, time.Second, eventuallyTick, bLog.String())
+}
+
+// Announcing a topic subscription costs nothing, so it must not buy a peer
+// connection-manager protection over peers that did not announce one.
+func TestTopicPeersAreNotTaggedForSubscribing(t *testing.T) {
+	a, b, bLog := newTopicPeers(t, "t1")
+
+	require.Eventually(t, func() bool { return strings.Contains(bLog.String(), "[CONNECTED] Topic peer") }, eventuallyTimeout, eventuallyTick)
+	if info := b.host.ConnManager().GetTagInfo(a.host.ID()); info != nil {
+		for tag := range info.Tags {
+			require.False(t, strings.HasPrefix(tag, "topic:"), "unexpected tag %q", tag)
+		}
+	}
 }

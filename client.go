@@ -161,6 +161,10 @@ type client struct {
 	// peerCacheWriter tracks the cache writer goroutine so Close can wait for
 	// it before its final save.
 	peerCacheWriter sync.WaitGroup
+
+	// connNotifee watches connections for topic peers. It is registered once
+	// per client and removed on Close.
+	connNotifee *network.NotifyBundle
 }
 
 // NewClient creates and initializes a new P2P client.
@@ -286,6 +290,12 @@ func NewClient(config Config) (Client, error) {
 	c.peerTracker.isConnected = func(id peer.ID) bool {
 		return h.Network().Connectedness(id) == network.Connected
 	}
+
+	c.connNotifee = &network.NotifyBundle{
+		ConnectedF:    func(_ network.Network, conn network.Conn) { go c.onConnected(conn) },
+		DisconnectedF: func(_ network.Network, conn network.Conn) { c.onDisconnected(conn) },
+	}
+	h.Network().Notify(c.connNotifee)
 
 	// Set up peer address request/response protocol handler
 	// This allows other peers to request addresses from us (useful for DHT-off clients)
@@ -787,37 +797,6 @@ func (c *client) Subscribe(topic string) <-chan Message {
 		default:
 		}
 
-		// Set up peer connection notifications for this topic
-		c.host.Network().Notify(&network.NotifyBundle{
-			ConnectedF: func(_ network.Network, conn network.Conn) {
-				go func() {
-					time.Sleep(500 * time.Millisecond)
-					peerID := conn.RemotePeer()
-					topicPeers := t.ListPeers()
-					if slices.Contains(topicPeers, peerID) {
-						// Tag topic peers with high value to protect from connection manager pruning
-						c.host.ConnManager().TagPeer(peerID, fmt.Sprintf("topic:%s", topic), 100)
-						c.logger.Debugf("Tagged topic peer %s for protection", peerID)
-
-						name := c.peerTracker.getName(peerID)
-						addr := conn.RemoteMultiaddr().String()
-						c.logger.Infof("[CONNECTED] Topic peer %s [%s] %s", peerID.String(), name, addr)
-
-						c.requestPeerCacheSave()
-					}
-				}()
-			},
-			DisconnectedF: func(_ network.Network, conn network.Conn) {
-				peerID := conn.RemotePeer()
-				topicPeers := t.ListPeers()
-				if slices.Contains(topicPeers, peerID) {
-					// Untag peer when they disconnect from topic
-					c.host.ConnManager().UntagPeer(peerID, fmt.Sprintf("topic:%s", topic))
-					c.logger.Infof("[DISCONNECTED] Lost connection to topic peer %s", peerID.String()[:16])
-				}
-			},
-		})
-
 		// Start receiving messages
 		c.receiveMessages(sub, t, msgChan)
 	}()
@@ -911,6 +890,7 @@ func (c *client) Close() error {
 	c.mu.Unlock()
 
 	if !alreadyClosed {
+		c.host.Network().StopNotify(c.connNotifee)
 		c.flushPeerCache()
 	}
 
@@ -1416,6 +1396,52 @@ func (c *client) receiveMessages(sub *pubsub.Subscription, topic *pubsub.Topic, 
 			return
 		}
 	}
+}
+
+// topicPeerConnectDelay is how long after a connection opens the client checks
+// whether the remote is a topic peer, giving it time to announce subscriptions.
+const topicPeerConnectDelay = 500 * time.Millisecond
+
+// onConnected logs a new connection to a topic peer and requests a peer cache
+// save. Connection-manager protection is left to gossipsub, which protects
+// mesh and direct peers and tags peers by the messages they deliver; a tag for
+// merely announcing a subscription would rank any Sybil above an operator's
+// outbound peers.
+func (c *client) onConnected(conn network.Conn) {
+	select {
+	case <-time.After(topicPeerConnectDelay):
+	case <-c.ctx.Done():
+		return
+	}
+
+	peerID := conn.RemotePeer()
+	if !c.isTopicPeer(peerID) {
+		return
+	}
+	c.logger.Infof("[CONNECTED] Topic peer %s [%s] %s", peerID.String(), c.peerTracker.getName(peerID), conn.RemoteMultiaddr())
+	c.requestPeerCacheSave()
+}
+
+// onDisconnected logs the loss of the last connection to a topic peer.
+func (c *client) onDisconnected(conn network.Conn) {
+	peerID := conn.RemotePeer()
+	if c.host.Network().Connectedness(peerID) == network.Connected || !c.isTopicPeer(peerID) {
+		return
+	}
+	c.logger.Infof("[DISCONNECTED] Lost connection to topic peer %s", peerID.String()[:16])
+}
+
+// isTopicPeer reports whether peerID is subscribed to any topic this client
+// has joined.
+func (c *client) isTopicPeer(peerID peer.ID) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for _, t := range c.topics {
+		if slices.Contains(t.ListPeers(), peerID) {
+			return true
+		}
+	}
+	return false
 }
 
 // flushPeerCache saves the peer cache on Close, so a save the writer was still
