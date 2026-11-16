@@ -25,7 +25,6 @@ func TestNewPeerTracker(t *testing.T) {
 
 	require.NotNil(t, tracker)
 	require.NotNil(t, tracker.names)
-	require.NotNil(t, tracker.isRelaying)
 	require.NotNil(t, tracker.topicPeers)
 	require.NotNil(t, tracker.lastSeen)
 	require.NotNil(t, tracker.malformed)
@@ -33,7 +32,6 @@ func TestNewPeerTracker(t *testing.T) {
 
 	// Verify maps are empty
 	assert.Empty(t, tracker.names)
-	assert.Empty(t, tracker.isRelaying)
 	assert.Empty(t, tracker.topicPeers)
 	assert.Empty(t, tracker.lastSeen)
 	assert.Empty(t, tracker.malformed)
@@ -429,4 +427,171 @@ func TestPeerTrackerGetAllTopicPeersDoesNotReturnDuplicates(t *testing.T) {
 	// Should only return one peer
 	assert.Len(t, peers, 1)
 	assert.Equal(t, peerID, peers[0])
+}
+
+// newBoundedTestTracker returns a tracker with a small cap, a fake clock and a
+// connectedness oracle backed by the returned set.
+func newBoundedTestTracker(maxPeers int, ttl time.Duration) (*peerTracker, *time.Time, map[peer.ID]bool) {
+	tracker := newPeerTracker()
+	clock := time.Unix(1_700_000_000, 0)
+	connected := make(map[peer.ID]bool)
+	tracker.maxPeers = maxPeers
+	tracker.ttl = ttl
+	tracker.now = func() time.Time { return clock }
+	tracker.isConnected = func(id peer.ID) bool { return connected[id] }
+	return tracker, &clock, connected
+}
+
+// requireForgotten asserts that no per-peer map still holds id.
+func requireForgotten(t *testing.T, tracker *peerTracker, id peer.ID) {
+	t.Helper()
+	tracker.mu.RLock()
+	defer tracker.mu.RUnlock()
+	require.NotContains(t, tracker.names, id)
+	require.NotContains(t, tracker.topicPeers, id)
+	require.NotContains(t, tracker.lastSeen, id)
+	require.NotContains(t, tracker.malformed, id)
+	require.NotContains(t, tracker.skipMalformed, id)
+	require.NotContains(t, tracker.elems, id)
+}
+
+// requireTrackedAtMost asserts every per-peer map holds at most n peers.
+func requireTrackedAtMost(t *testing.T, tracker *peerTracker, n int) {
+	t.Helper()
+	tracker.mu.RLock()
+	defer tracker.mu.RUnlock()
+	require.LessOrEqual(t, len(tracker.names), n)
+	require.LessOrEqual(t, len(tracker.topicPeers), n)
+	require.LessOrEqual(t, len(tracker.lastSeen), n)
+	require.LessOrEqual(t, len(tracker.malformed), n)
+	require.LessOrEqual(t, len(tracker.skipMalformed), n)
+	require.LessOrEqual(t, len(tracker.elems), n)
+	require.LessOrEqual(t, tracker.order.Len(), n)
+}
+
+// A flood of messages from freshly minted author IDs must not grow the tracker
+// past its cap, whether the messages are valid or malformed.
+func TestPeerTrackerBoundedUnderAuthorFlood(t *testing.T) {
+	const maxPeers = 8
+	tracker, _, _ := newBoundedTestTracker(maxPeers, time.Hour)
+
+	for i := 0; i < 10*maxPeers; i++ {
+		id := generateTestPeerID(t)
+		if i%2 == 0 {
+			tracker.updateName(id, "sybil")
+			tracker.recordMessageFrom(id)
+		} else {
+			tracker.recordMalformed(id)
+		}
+		requireTrackedAtMost(t, tracker, maxPeers)
+	}
+	require.Len(t, tracker.getAllTopicPeers(), maxPeers/2)
+}
+
+// At the cap the least recently active peer is evicted from every map.
+func TestPeerTrackerCapEvictsLeastRecentlyActive(t *testing.T) {
+	tracker, clock, _ := newBoundedTestTracker(3, time.Hour)
+	a, b, c, d := generateTestPeerID(t), generateTestPeerID(t), generateTestPeerID(t), generateTestPeerID(t)
+
+	for _, id := range []peer.ID{a, b, c} {
+		tracker.updateName(id, "n")
+		tracker.recordMessageFrom(id)
+		*clock = clock.Add(time.Second)
+	}
+	tracker.recordMalformed(b)
+
+	// a becomes the most recently active, leaving b as the oldest.
+	*clock = clock.Add(time.Second)
+	tracker.recordMessageFrom(a)
+	*clock = clock.Add(time.Second)
+	tracker.recordMessageFrom(c)
+
+	*clock = clock.Add(time.Second)
+	tracker.recordMessageFrom(d)
+
+	requireForgotten(t, tracker, b)
+	assertPeersMatch(t, []peer.ID{a, c, d}, tracker.getAllTopicPeers())
+	require.Equal(t, "n", tracker.getName(a))
+	require.Equal(t, "unknown", tracker.getName(b))
+}
+
+// A peer silent for longer than the TTL is forgotten on the next insert.
+func TestPeerTrackerExpiresIdlePeers(t *testing.T) {
+	tracker, clock, _ := newBoundedTestTracker(100, time.Minute)
+	idle, fresh := generateTestPeerID(t), generateTestPeerID(t)
+
+	tracker.updateName(idle, "idle")
+	tracker.recordMessageFrom(idle)
+
+	*clock = clock.Add(time.Minute)
+	tracker.recordMessageFrom(fresh)
+
+	requireForgotten(t, tracker, idle)
+	assertPeersMatch(t, []peer.ID{fresh}, tracker.getAllTopicPeers())
+}
+
+// Expired peers are not reported even if no insert has evicted them yet.
+func TestPeerTrackerGetAllTopicPeersSkipsExpired(t *testing.T) {
+	tracker, clock, _ := newBoundedTestTracker(100, time.Minute)
+	idle := generateTestPeerID(t)
+	tracker.recordMessageFrom(idle)
+
+	*clock = clock.Add(time.Minute)
+	require.Empty(t, tracker.getAllTopicPeers())
+}
+
+// Connected peers are never evicted, neither by the TTL nor by the cap: callers
+// rely on GetPeers listing every connected author.
+func TestPeerTrackerKeepsConnectedPeers(t *testing.T) {
+	tracker, clock, connected := newBoundedTestTracker(2, time.Minute)
+	neighbour := generateTestPeerID(t)
+	connected[neighbour] = true
+
+	tracker.updateName(neighbour, "neighbour")
+	tracker.recordMessageFrom(neighbour)
+
+	// Long past the TTL, and pushed against the cap by a flood.
+	*clock = clock.Add(time.Hour)
+	for i := 0; i < 10; i++ {
+		tracker.recordMessageFrom(generateTestPeerID(t))
+		requireTrackedAtMost(t, tracker, 2)
+	}
+
+	require.Contains(t, tracker.getAllTopicPeers(), neighbour)
+	require.Equal(t, "neighbour", tracker.getName(neighbour))
+}
+
+// When every tracked peer is connected the cap yields rather than evicting a
+// connected peer, and the eviction loop still terminates.
+func TestPeerTrackerAllConnectedOverCap(t *testing.T) {
+	tracker, _, connected := newBoundedTestTracker(2, time.Minute)
+	ids := []peer.ID{generateTestPeerID(t), generateTestPeerID(t), generateTestPeerID(t)}
+	for _, id := range ids {
+		connected[id] = true
+		tracker.recordMessageFrom(id)
+	}
+	assertPeersMatch(t, ids, tracker.getAllTopicPeers())
+}
+
+// A new peer arriving when every other tracked peer is connected must stay
+// fully tracked, so its entries can still be evicted later.
+func TestPeerTrackerNewPeerSurvivesConnectedCap(t *testing.T) {
+	tracker, clock, connected := newBoundedTestTracker(2, time.Minute)
+	c1, c2 := generateTestPeerID(t), generateTestPeerID(t)
+	for _, id := range []peer.ID{c1, c2} {
+		connected[id] = true
+		tracker.recordMessageFrom(id)
+	}
+
+	newcomer := generateTestPeerID(t)
+	tracker.updateName(newcomer, "newcomer")
+	tracker.recordMessageFrom(newcomer)
+	require.Contains(t, tracker.elems, newcomer, "newcomer must be in the eviction order")
+
+	// Once a connected peer leaves, the newcomer is evictable again.
+	delete(connected, c1)
+	*clock = clock.Add(time.Minute)
+	tracker.recordMessageFrom(c2)
+	requireForgotten(t, tracker, newcomer)
+	requireForgotten(t, tracker, c1)
 }

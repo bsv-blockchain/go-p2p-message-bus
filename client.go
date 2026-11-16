@@ -78,6 +78,11 @@ const (
 	// peer is remembered before it is attempted again.
 	peerAddressRetryInterval = 5 * time.Minute
 
+	// maxConcurrentAddrLookups caps the outbound peer-address lookups running at
+	// once. Each lookup walks every connected peer, so without a cap one scan over
+	// a large topic peer set would start a goroutine per unconnected peer at once.
+	maxConcurrentAddrLookups = 16
+
 	// peerAddressRequestWindow and peerAddressRequestsPerWindow bound how many
 	// inbound address requests a single peer may open; excess streams are reset.
 	// A legitimate peer asks each neighbour once per unknown topic peer per 15s
@@ -245,6 +250,9 @@ func NewClient(config Config) (Client, error) {
 		peerAddrStreamTimeout: streamTimeout,
 		peerAddrLimiter:       newPeerAddressLimiter(),
 		addrLookupsInFlight:   make(map[peer.ID]struct{}),
+	}
+	c.peerTracker.isConnected = func(id peer.ID) bool {
+		return h.Network().Connectedness(id) == network.Connected
 	}
 
 	// Set up peer address request/response protocol handler
@@ -1182,13 +1190,20 @@ func (c *client) attemptDirectConnectionsToTopicPeers(ctx context.Context) {
 
 // scanTopicPeersForAddresses starts a lookup for every topic peer that is not
 // directly connected and is due for one, recording the attempt in requested.
+// Once maxConcurrentAddrLookups are running the remaining peers are left
+// unrequested, so the next scan picks them up.
 func (c *client) scanTopicPeersForAddresses(requested map[peer.ID]time.Time, now time.Time) {
 	allTopicPeers := c.peerTracker.getAllTopicPeers()
 	c.logger.Debugf("Scanning %d topic peers for address discovery", len(allTopicPeers))
 
+	saturated := false
 	topicSet := make(map[peer.ID]struct{}, len(allTopicPeers))
 	for _, targetPeer := range allTopicPeers {
 		topicSet[targetPeer] = struct{}{}
+
+		if saturated {
+			continue
+		}
 
 		// Skip if already connected directly
 		if c.host.Network().Connectedness(targetPeer) == network.Connected {
@@ -1199,9 +1214,18 @@ func (c *client) scanTopicPeersForAddresses(requested map[peer.ID]time.Time, now
 			continue
 		}
 
-		// Request addresses from connected peers
-		go c.requestPeerAddresses(targetPeer)
+		// Reserve the lookup here rather than in the goroutine, so the cap holds
+		// for the lookups this scan starts.
+		started, full := c.beginAddrLookup(targetPeer)
+		if full {
+			saturated = true
+			continue
+		}
+		if !started {
+			continue
+		}
 		requested[targetPeer] = now
+		go c.lookupPeerAddresses(targetPeer)
 	}
 
 	pruneRequested(requested, topicSet)
@@ -1289,7 +1313,7 @@ func (c *client) handleMalformedMessage(author peer.ID, topicName string, data [
 	}
 	count, justSkipped := c.peerTracker.recordMalformed(author)
 	c.logger.Debugf("Malformed message from %s (%s) on topic %s: %v (count=%d, len=%d, preview=%q, hex=%x)",
-		c.peerTracker.getName(author), author.String(), topicName, err, count, len(data), preview, data)
+		c.peerTracker.getName(author), author.String(), topicName, err, count, len(data), preview, preview)
 	if justSkipped {
 		c.logger.Warnf("Skipping peer %s (%s) on topic %s: %d malformed messages exceeded threshold",
 			c.peerTracker.getName(author), author.String(), topicName, count)
@@ -1402,12 +1426,18 @@ func (c *client) savePeerCache() {
 }
 
 // requestPeerAddresses asks connected peers if they know addresses for a target
-// peer. At most one lookup per target runs at a time; a call that finds one in
-// flight returns immediately.
+// peer. At most one lookup per target, and maxConcurrentAddrLookups in total,
+// run at a time; a call that would exceed either returns immediately.
 func (c *client) requestPeerAddresses(targetPeerID peer.ID) {
-	if !c.beginAddrLookup(targetPeerID) {
+	if started, _ := c.beginAddrLookup(targetPeerID); !started {
 		return
 	}
+	c.lookupPeerAddresses(targetPeerID)
+}
+
+// lookupPeerAddresses runs a lookup reserved by beginAddrLookup and releases
+// the reservation when done.
+func (c *client) lookupPeerAddresses(targetPeerID peer.ID) {
 	defer c.endAddrLookup(targetPeerID)
 
 	peerName := c.peerTracker.getName(targetPeerID)
@@ -1464,15 +1494,19 @@ func (c *client) requestPeerAddresses(targetPeerID peer.ID) {
 }
 
 // beginAddrLookup marks targetPeerID as being looked up and reports whether
-// the caller won that right.
-func (c *client) beginAddrLookup(targetPeerID peer.ID) bool {
+// the caller won that right. full reports that maxConcurrentAddrLookups are
+// already running.
+func (c *client) beginAddrLookup(targetPeerID peer.ID) (started, full bool) {
 	c.addrLookupsMu.Lock()
 	defer c.addrLookupsMu.Unlock()
 	if _, inFlight := c.addrLookupsInFlight[targetPeerID]; inFlight {
-		return false
+		return false, false
+	}
+	if len(c.addrLookupsInFlight) >= maxConcurrentAddrLookups {
+		return false, true
 	}
 	c.addrLookupsInFlight[targetPeerID] = struct{}{}
-	return true
+	return true, false
 }
 
 func (c *client) endAddrLookup(targetPeerID peer.ID) {

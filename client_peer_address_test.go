@@ -484,6 +484,36 @@ func TestScanTopicPeersRetriesFailedLookup(t *testing.T) {
 	require.Eventually(t, func() bool { return accepted.Load() == 2 }, eventuallyTimeout, eventuallyTick)
 }
 
+// One scan over a flood of unconnected topic peers starts at most
+// maxConcurrentAddrLookups lookups; the rest are left unrequested so a later
+// scan picks them up instead of waiting out the retry interval.
+func TestScanTopicPeersCapsConcurrentLookups(t *testing.T) {
+	a, b := newConnectedClients(t, eventuallyTimeout)
+	accepted, _ := installBlackHoleHandler(t, a)
+
+	targets := make([]peer.ID, 0, 3*maxConcurrentAddrLookups)
+	for i := 0; i < cap(targets); i++ {
+		id := newTestPeerID(t)
+		targets = append(targets, id)
+		b.peerTracker.recordMessageFrom(id)
+	}
+
+	requested := make(map[peer.ID]time.Time)
+	b.scanTopicPeersForAddresses(requested, time.Now())
+
+	require.Len(t, requested, maxConcurrentAddrLookups)
+	require.Eventually(t, func() bool { return accepted.Load() == maxConcurrentAddrLookups }, eventuallyTimeout, eventuallyTick)
+	require.Never(t, func() bool { return accepted.Load() > maxConcurrentAddrLookups }, 200*time.Millisecond, eventuallyTick)
+
+	// A second scan while the first lookups are still blocked starts nothing.
+	b.scanTopicPeersForAddresses(requested, time.Now())
+	require.Len(t, requested, maxConcurrentAddrLookups)
+
+	// Direct calls are capped too.
+	b.requestPeerAddresses(targets[len(targets)-1])
+	require.EqualValues(t, maxConcurrentAddrLookups, accepted.Load())
+}
+
 func TestExchangePeerAddressRequestRejectsOversizedResponse(t *testing.T) {
 	a, b := newConnectedClients(t, eventuallyTimeout)
 	target := newTestPeerID(t)
