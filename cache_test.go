@@ -2,8 +2,12 @@ package p2p
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -639,4 +643,186 @@ func FuzzLoadPeerCache(f *testing.F) {
 		peersNoEvict := loadPeerCache(cacheFile, -1, logger)
 		validatePeerCacheResult(t, peers, peersNoEvict)
 	})
+}
+
+// Concurrent saves of snapshots of different sizes must never expose a torn
+// or empty file to a reader, and must not leave temporary files behind.
+func TestSavePeerCacheConcurrentWritersNeverTear(t *testing.T) {
+	dir := t.TempDir()
+	cacheFile := filepath.Join(dir, testCacheFileName)
+	logger := &DefaultLogger{}
+
+	snapshot := func(n int) []cachedPeer {
+		peers := make([]cachedPeer, n)
+		for i := range peers {
+			peers[i] = cachedPeer{ID: fmt.Sprintf("peer-%d-%d", n, i), Name: strings.Repeat("n", 64), Addrs: []string{testAddrRemote}, LastSeen: time.Now()}
+		}
+		return peers
+	}
+	savePeerCache(snapshot(1), cacheFile, logger)
+
+	stop := make(chan struct{})
+	torn := make(chan []byte, 1)
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			data, err := os.ReadFile(cacheFile) // #nosec G304 -- test file
+			if err == nil && !json.Valid(data) {
+				select {
+				case torn <- data:
+				default:
+				}
+				return
+			}
+		}
+	}()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			for j := 0; j < 20; j++ {
+				savePeerCache(snapshot(n), cacheFile, logger)
+			}
+		}((i%4 + 1) * 300)
+	}
+	wg.Wait()
+	close(stop)
+	<-readerDone
+
+	select {
+	case data := <-torn:
+		t.Fatalf("reader saw a torn peer cache (%d bytes)", len(data))
+	default:
+	}
+
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "temporary files must not be left behind")
+}
+
+func TestMergePeerCache(t *testing.T) {
+	now := time.Now()
+	at := func(id string, ago time.Duration) cachedPeer {
+		return cachedPeer{ID: id, Name: id, Addrs: []string{testAddrRemote}, LastSeen: now.Add(-ago)}
+	}
+	ids := func(peers []cachedPeer) []string {
+		out := make([]string, len(peers))
+		for i, p := range peers {
+			out[i] = p.ID
+		}
+		return out
+	}
+
+	t.Run("keeps existing peers that are not connected now", func(t *testing.T) {
+		merged := mergePeerCache([]cachedPeer{at("old", time.Hour)}, []cachedPeer{at("new", 0)}, 10)
+		require.Equal(t, []string{"new", "old"}, ids(merged))
+	})
+
+	t.Run("current snapshot replaces the existing entry", func(t *testing.T) {
+		current := at("p", 0)
+		current.Addrs = []string{testAddrLocalhost}
+		merged := mergePeerCache([]cachedPeer{at("p", time.Hour)}, []cachedPeer{current}, 10)
+		require.Len(t, merged, 1)
+		require.Equal(t, []string{testAddrLocalhost}, merged[0].Addrs)
+		require.WithinDuration(t, now, merged[0].LastSeen, time.Second)
+	})
+
+	t.Run("caps to the most recently seen peers", func(t *testing.T) {
+		existing := []cachedPeer{at("e1", 3*time.Hour), at("e2", 2*time.Hour), {ID: "never", Addrs: []string{testAddrRemote}}}
+		merged := mergePeerCache(existing, []cachedPeer{at("c1", 0), at("c2", time.Minute)}, 3)
+		require.Equal(t, []string{"c1", "c2", "e2"}, ids(merged))
+	})
+}
+
+// newCacheTopicClients connects two clients on a shared topic; b persists its
+// peer cache to cacheFile and coalesces saves over saveInterval.
+func newCacheTopicClients(t *testing.T, cacheFile string, saveInterval time.Duration) (a, b *client) {
+	t.Helper()
+	a, b = newConnectedClientsWith(t, eventuallyTimeout, func(name string, cfg *Config) {
+		if name == "peer-b" {
+			cfg.PeerCacheFile = cacheFile
+			cfg.peerCacheSaveInterval = saveInterval
+		}
+	})
+
+	const topic = "peer-cache-topic"
+	a.Subscribe(topic)
+	b.Subscribe(topic)
+	require.Eventually(t, func() bool {
+		b.mu.RLock()
+		tp, ok := b.topics[topic]
+		b.mu.RUnlock()
+		return ok && slices.Contains(tp.ListPeers(), a.host.ID())
+	}, eventuallyTimeout, eventuallyTick)
+	return a, b
+}
+
+func cachedPeerIDs(t *testing.T, cacheFile string) []string {
+	t.Helper()
+	peers := loadPeerCache(cacheFile, -1, &DefaultLogger{})
+	ids := make([]string, 0, len(peers))
+	for _, p := range peers {
+		ids = append(ids, p.ID)
+	}
+	return ids
+}
+
+// Saving merges the connected topic peers into the existing cache: peers seen
+// within the TTL survive, stale ones are dropped.
+func TestClientSavePeerCacheMergesExisting(t *testing.T) {
+	cacheFile := filepath.Join(t.TempDir(), testCacheFileName)
+	now := time.Now()
+	savePeerCache([]cachedPeer{
+		{ID: testPeerID1, Name: "recent", Addrs: []string{testAddrRemote}, LastSeen: now.Add(-time.Hour)},
+		{ID: "stale-peer", Name: "stale", Addrs: []string{testAddrRemote}, LastSeen: now.Add(-48 * time.Hour)},
+	}, cacheFile, &DefaultLogger{})
+
+	a, b := newCacheTopicClients(t, cacheFile, time.Hour)
+	b.savePeerCache()
+
+	require.ElementsMatch(t, []string{testPeerID1, a.host.ID().String()}, cachedPeerIDs(t, cacheFile))
+}
+
+// Any number of save requests within one interval produce a single write.
+func TestPeerCacheSaveRequestsCoalesce(t *testing.T) {
+	const interval = 300 * time.Millisecond
+	cacheFile := filepath.Join(t.TempDir(), testCacheFileName)
+	_, b := newCacheTopicClients(t, cacheFile, interval)
+
+	exists := func() bool {
+		_, err := os.Stat(cacheFile)
+		return err == nil
+	}
+
+	// Let saves triggered while the connection was set up land first.
+	time.Sleep(time.Second + 2*interval)
+	_ = os.Remove(cacheFile)
+
+	for i := 0; i < 50; i++ {
+		b.requestPeerCacheSave()
+	}
+	require.Never(t, exists, interval/2, eventuallyTick, "save must wait for the interval")
+	require.Eventually(t, exists, eventuallyTimeout, eventuallyTick)
+
+	require.NoError(t, os.Remove(cacheFile))
+	require.Never(t, exists, 3*interval, eventuallyTick, "requests must coalesce into one write")
+}
+
+// Close writes a pending save instead of dropping it.
+func TestClosePersistsPeerCache(t *testing.T) {
+	cacheFile := filepath.Join(t.TempDir(), testCacheFileName)
+	a, b := newCacheTopicClients(t, cacheFile, time.Hour)
+
+	b.requestPeerCacheSave()
+	require.NoError(t, b.Close())
+
+	require.Contains(t, cachedPeerIDs(t, cacheFile), a.host.ID().String())
 }

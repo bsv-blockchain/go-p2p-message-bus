@@ -48,18 +48,29 @@ func newTestPeerID(t *testing.T) peer.ID {
 // peer-address stream deadline and connects b to a.
 func newConnectedClients(t *testing.T, streamTimeout time.Duration) (a, b *client) {
 	t.Helper()
+	return newConnectedClientsWith(t, streamTimeout, nil)
+}
+
+// newConnectedClientsWith is newConnectedClients with a hook that may adjust
+// each client's Config, identified by its name ("peer-a" or "peer-b").
+func newConnectedClientsWith(t *testing.T, streamTimeout time.Duration, configure func(name string, cfg *Config)) (a, b *client) {
+	t.Helper()
 
 	newClient := func(name string) *client {
 		privKey, err := GeneratePrivateKey()
 		require.NoError(t, err)
-		cl, err := NewClient(Config{
+		cfg := Config{
 			Name:                     name,
 			PrivateKey:               privKey,
 			Port:                     0,
 			AllowPrivateIPs:          true,
 			DHTMode:                  "off",
 			peerAddressStreamTimeout: streamTimeout,
-		})
+		}
+		if configure != nil {
+			configure(name, &cfg)
+		}
+		cl, err := NewClient(cfg)
 		require.NoError(t, err)
 		t.Cleanup(func() { require.NoError(t, cl.Close()) })
 		return cl.(*client)

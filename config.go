@@ -208,6 +208,11 @@ type Config struct {
 	// unexported because production peers must agree on the default.
 	peerAddressStreamTimeout time.Duration
 
+	// peerCacheSaveInterval overrides how long peer cache save requests are
+	// coalesced before one write. Zero means peerCacheSaveInterval. Tests
+	// shorten it.
+	peerCacheSaveInterval time.Duration
+
 	// DHTCleanupInterval is the interval at which the DHT's ProviderManager performs
 	// garbage collection of expired provider records. The cleanup involves querying all
 	// provider records and removing expired entries.

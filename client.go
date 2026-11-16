@@ -13,6 +13,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -83,6 +84,17 @@ const (
 	// a large topic peer set would start a goroutine per unconnected peer at once.
 	maxConcurrentAddrLookups = 16
 
+	// defaultPeerCacheTTL is how long a peer stays in the peer cache after it was
+	// last seen connected, when Config.PeerCacheTTL is zero.
+	defaultPeerCacheTTL = 24 * time.Hour
+
+	// peerCacheSaveInterval is the least time between two peer cache writes.
+	// Connection events request a save; requests within one interval coalesce.
+	peerCacheSaveInterval = 30 * time.Second
+
+	// maxCachedPeers caps the peer cache, keeping the most recently seen peers.
+	maxCachedPeers = 1000
+
 	// peerAddressRequestWindow and peerAddressRequestsPerWindow bound how many
 	// inbound address requests a single peer may open; excess streams are reset.
 	// A legitimate peer asks each neighbour once per unknown topic peer per 15s
@@ -139,6 +151,16 @@ type client struct {
 	// retry loop never runs two lookups for one target concurrently.
 	addrLookupsMu       sync.Mutex
 	addrLookupsInFlight map[peer.ID]struct{}
+
+	// peerCacheMu serializes peer cache read-merge-write cycles.
+	peerCacheMu sync.Mutex
+	// peerCacheSaveReq carries save requests to the single cache writer.
+	peerCacheSaveReq chan struct{}
+	// peerCacheSaveDelay is how long the writer coalesces save requests.
+	peerCacheSaveDelay time.Duration
+	// peerCacheWriter tracks the cache writer goroutine so Close can wait for
+	// it before its final save.
+	peerCacheWriter sync.WaitGroup
 }
 
 // NewClient creates and initializes a new P2P client.
@@ -250,6 +272,16 @@ func NewClient(config Config) (Client, error) {
 		peerAddrStreamTimeout: streamTimeout,
 		peerAddrLimiter:       newPeerAddressLimiter(),
 		addrLookupsInFlight:   make(map[peer.ID]struct{}),
+
+		peerCacheSaveReq:   make(chan struct{}, 1),
+		peerCacheSaveDelay: peerCacheSaveInterval,
+	}
+	if config.peerCacheSaveInterval > 0 {
+		c.peerCacheSaveDelay = config.peerCacheSaveInterval
+	}
+	if config.PeerCacheFile != "" {
+		c.peerCacheWriter.Add(1)
+		go c.runPeerCacheWriter(ctx)
 	}
 	c.peerTracker.isConnected = func(id peer.ID) bool {
 		return h.Network().Connectedness(id) == network.Connected
@@ -675,17 +707,20 @@ func connectToManagedPeers(ctx context.Context, h host.Host, kind string, peers 
 	}
 }
 
+// peerCacheTTL returns Config.PeerCacheTTL, or defaultPeerCacheTTL when unset.
+func peerCacheTTL(config Config) time.Duration {
+	if config.PeerCacheTTL == 0 {
+		return defaultPeerCacheTTL
+	}
+	return config.PeerCacheTTL
+}
+
 func loadAndConnectCachedPeers(ctx context.Context, h host.Host, config Config, log logger) {
 	if config.PeerCacheFile == "" {
 		return
 	}
 
-	ttl := config.PeerCacheTTL
-	if ttl == 0 {
-		ttl = 24 * time.Hour
-	}
-
-	cachedPeers := loadPeerCache(config.PeerCacheFile, ttl, log)
+	cachedPeers := loadPeerCache(config.PeerCacheFile, peerCacheTTL(config), log)
 	if len(cachedPeers) > 0 {
 		log.Infof("Connecting to %d cached peers...", len(cachedPeers))
 		connectToCachedPeers(ctx, h, cachedPeers, log)
@@ -768,8 +803,7 @@ func (c *client) Subscribe(topic string) <-chan Message {
 						addr := conn.RemoteMultiaddr().String()
 						c.logger.Infof("[CONNECTED] Topic peer %s [%s] %s", peerID.String(), name, addr)
 
-						// Save peer cache
-						c.savePeerCache()
+						c.requestPeerCacheSave()
 					}
 				}()
 			},
@@ -872,8 +906,13 @@ const (
 // it is about to send on. Safe to call more than once.
 func (c *client) Close() error {
 	c.mu.Lock()
+	alreadyClosed := c.closed
 	c.closed = true
 	c.mu.Unlock()
+
+	if !alreadyClosed {
+		c.flushPeerCache()
+	}
 
 	c.cancel()
 
@@ -903,6 +942,9 @@ func (c *client) Close() error {
 		case <-time.After(closeReadersWait):
 			c.logger.Warnf("Subscription readers did not exit within %s, tearing down host anyway", closeReadersWait)
 		}
+
+		// The writer exits on cancel; wait so it never saves into a closed host.
+		c.peerCacheWriter.Wait()
 
 		c.mu.Lock()
 		// Close all topics
@@ -1376,11 +1418,75 @@ func (c *client) receiveMessages(sub *pubsub.Subscription, topic *pubsub.Topic, 
 	}
 }
 
+// flushPeerCache saves the peer cache on Close, so a save the writer was still
+// coalescing is not lost. It must run before the client context is cancelled:
+// Topic.ListPeers goes through the pubsub event loop, which stops on cancel.
+// The wait is bounded so a wedged event loop cannot stall shutdown.
+func (c *client) flushPeerCache() {
+	if c.config.PeerCacheFile == "" {
+		return
+	}
+	saved := make(chan struct{})
+	go func() {
+		defer close(saved)
+		c.savePeerCache()
+	}()
+	select {
+	case <-saved:
+	case <-time.After(closeReadersWait):
+		c.logger.Warnf("Peer cache save did not finish within %s, closing anyway", closeReadersWait)
+	}
+}
+
+// requestPeerCacheSave asks the cache writer to save the peer cache. It never
+// blocks; requests made while one is pending coalesce into it.
+func (c *client) requestPeerCacheSave() {
+	select {
+	case c.peerCacheSaveReq <- struct{}{}:
+	default:
+	}
+}
+
+// runPeerCacheWriter is the only goroutine that saves the peer cache while the
+// client runs. It waits peerCacheSaveDelay after a request before saving, so
+// connection churn costs at most one write per interval.
+func (c *client) runPeerCacheWriter(ctx context.Context) {
+	defer c.peerCacheWriter.Done()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-c.peerCacheSaveReq:
+		}
+
+		timer := time.NewTimer(c.peerCacheSaveDelay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+
+		// The save below covers any request made while waiting.
+		select {
+		case <-c.peerCacheSaveReq:
+		default:
+		}
+		c.savePeerCache()
+	}
+}
+
+// savePeerCache merges the topic peers connected now into the cache file.
+// Entries for peers not connected now are kept until they are older than the
+// cache TTL.
 func (c *client) savePeerCache() {
 	// Skip if peer caching is disabled
 	if c.config.PeerCacheFile == "" {
 		return
 	}
+
+	c.peerCacheMu.Lock()
+	defer c.peerCacheMu.Unlock()
 
 	// Collect unique peers from all topics
 	peerSet := make(map[peer.ID]struct{})
@@ -1394,15 +1500,7 @@ func (c *client) savePeerCache() {
 	}
 	c.mu.RUnlock()
 
-	// Load existing cache to preserve LastSeen for peers not currently connected
-	// Use negative TTL to disable eviction when loading for merge
-	existingPeers := loadPeerCache(c.config.PeerCacheFile, -1, c.logger)
-	existingMap := make(map[string]time.Time)
-	for _, ep := range existingPeers {
-		existingMap[ep.ID] = ep.LastSeen
-	}
-
-	var cachedPeers []cachedPeer
+	var current []cachedPeer
 	now := time.Now()
 
 	for p := range peerSet {
@@ -1411,7 +1509,7 @@ func (c *client) savePeerCache() {
 			for _, conn := range conns {
 				addrs = append(addrs, conn.RemoteMultiaddr().String())
 			}
-			cachedPeers = append(cachedPeers, cachedPeer{
+			current = append(current, cachedPeer{
 				ID:       p.String(),
 				Name:     c.peerTracker.getName(p),
 				Addrs:    addrs,
@@ -1420,9 +1518,38 @@ func (c *client) savePeerCache() {
 		}
 	}
 
-	if len(cachedPeers) > 0 {
-		savePeerCache(cachedPeers, c.config.PeerCacheFile, c.logger)
+	if len(current) == 0 {
+		return
 	}
+
+	existing := loadPeerCache(c.config.PeerCacheFile, peerCacheTTL(c.config), c.logger)
+	savePeerCache(mergePeerCache(existing, current, maxCachedPeers), c.config.PeerCacheFile, c.logger)
+}
+
+// mergePeerCache returns current plus every existing entry for a peer not in
+// current, most recently seen first and at most limit long. Entries without a
+// LastSeen sort last.
+func mergePeerCache(existing, current []cachedPeer, limit int) []cachedPeer {
+	byID := make(map[string]cachedPeer, len(existing)+len(current))
+	for _, p := range existing {
+		byID[p.ID] = p
+	}
+	for _, p := range current {
+		byID[p.ID] = p
+	}
+
+	merged := make([]cachedPeer, 0, len(byID))
+	for _, p := range byID {
+		merged = append(merged, p)
+	}
+	slices.SortFunc(merged, func(a, b cachedPeer) int {
+		if c := b.LastSeen.Compare(a.LastSeen); c != 0 {
+			return c
+		}
+		return strings.Compare(a.ID, b.ID)
+	})
+
+	return merged[:min(len(merged), limit)]
 }
 
 // requestPeerAddresses asks connected peers if they know addresses for a target
@@ -1772,9 +1899,35 @@ func savePeerCache(peers []cachedPeer, cacheFile string, logger logger) {
 		return
 	}
 
-	if err := os.WriteFile(cacheFile, data, 0o600); err != nil {
+	if err := writeFileAtomic(cacheFile, data); err != nil {
 		logger.Warnf("Failed to write peer cache: %v", err)
 	}
+}
+
+// writeFileAtomic writes data to a temporary file beside path and renames it
+// over path, so a concurrent reader or a crash never sees a partial file. The
+// file is created with mode 0600.
+func writeFileAtomic(path string, data []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+
+	_, err = tmp.Write(data)
+	if err == nil {
+		err = tmp.Sync()
+	}
+	if closeErr := tmp.Close(); err == nil {
+		err = closeErr
+	}
+	if err == nil {
+		err = os.Rename(tmpName, path)
+	}
+	if err != nil {
+		_ = os.Remove(tmpName)
+	}
+	return err
 }
 
 func parseMultiaddrs(addrs []string) []multiaddr.Multiaddr {
