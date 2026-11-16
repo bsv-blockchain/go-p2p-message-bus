@@ -328,6 +328,40 @@ When set:
 
 Filtering is on the authenticated libp2p peer ID of the message author, so it cannot be bypassed by a peer claiming another peer's `Name`. Note that this is an identity filter, not a content filter, and it does not protect against a compromised key belonging to a listed peer. It filters on authorship, not on freshness or liveness: a message an allowlisted publisher authored once can be replayed by any peer and will be delivered as new once libp2p's seen-cache window for it has passed, so reject stale or duplicate work at the application layer if that matters.
 
+**Validating Messages Before They Are Relayed:**
+
+GossipSub forwards a message to the mesh before `Subscribe` hands it to you, so a size check in your subscriber protects only your own node. `TopicValidators` runs before delivery and before forwarding:
+
+```go
+client, err := p2p.NewClient(p2p.Config{
+    Name:       "node1",
+    PrivateKey: privKey,
+    TopicValidators: map[string]p2p.TopicValidator{
+        "myapp-block": {
+            MaxPayloadSize: 10 * 1024,
+            // Optional, runs on the decoded payload; must be cheap and non-blocking.
+            Validate: func(ctx context.Context, from peer.ID, data []byte) pubsub.ValidationResult {
+                if !json.Valid(data) {
+                    return pubsub.ValidationReject
+                }
+                return pubsub.ValidationAccept
+            },
+        },
+    },
+})
+```
+
+- The key is the topic name exactly as passed to `Subscribe` and `Publish`
+- `MaxPayloadSize` is required. The raw envelope is size-checked before it is decoded, so an oversized message costs no decoding work
+- A failing message is rejected: it is neither delivered nor forwarded. With peer scoring on, pubsub charges the rejection to the peer that forwarded it, on topics whose score params weight invalid deliveries. `Validate` may return `ValidationIgnore` instead to drop without penalty
+- Messages the `AllowedPublisherIDs` filter drops are ignored, never rejected, so the allowlist's no-penalty promise holds
+- `Publish` sends `Name` sanitized to 64 printable bytes, the form receivers keep anyway, so a long name cannot push a payload over the limit
+- `Validate` receives the authenticated author's peer ID, not the peer that forwarded the message
+- Your own publishes pass the same validator; a rejected `Publish` returns a `pubsub.ValidationError`
+- Rejections are logged as one aggregate line per topic per interval: `Dropped N message(s) on topic <topic> that failed validation since the last report`
+
+`MaxMessageSize` overrides the pubsub wire limit (default 1MiB), but it limits whole RPC frames, not single messages. A peer packs several messages and control traffic into one frame sized by its own limit, and a frame over yours resets that peer's stream. Lower it only when every peer on the network runs the same lower limit; use `TopicValidators` to bound message sizes.
+
 **Kubernetes Support:**
 
 The `AnnounceAddrs` field allows you to specify the external addresses that your peer should advertise. This is essential in Kubernetes where the pod's internal IP differs from the externally accessible address:

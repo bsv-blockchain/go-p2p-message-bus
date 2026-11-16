@@ -179,6 +179,10 @@ func buildPubSubOptions(config Config, allowlist *peerAllowlist, staticPeers []p
 			allowlistValidator(allowlist, log), pubsub.WithValidatorInline(true)))
 	}
 
+	if config.MaxMessageSize > 0 {
+		opts = append(opts, pubsub.WithMaxMessageSize(config.MaxMessageSize))
+	}
+
 	if config.DisablePeerExchange {
 		log.Infof("GossipSub peer exchange disabled")
 	} else {

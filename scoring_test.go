@@ -120,6 +120,11 @@ func TestBuildPubSubOptions(t *testing.T) {
 			wantOptions: 0,
 		},
 		{
+			name:        "max message size set: adds the wire cap",
+			config:      Config{DisablePeerExchange: true, MaxMessageSize: 64 * 1024},
+			wantOptions: 1,
+		},
+		{
 			name:    "incomplete scoring config is an error",
 			config:  Config{PeerScoreParams: DefaultPeerScoreParams()},
 			wantErr: true,

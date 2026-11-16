@@ -264,7 +264,7 @@ func TestPublishSucceedsWithAllowlistEnabled(t *testing.T) {
 // sentinel, bypassing the elapsed-time check rather than relying on it - and
 // logging resets the counter.
 func TestDropReporterFirstDropLogsAndResets(t *testing.T) {
-	r := newDropReporter()
+	r := newDropReporter("from non-allowlisted peers")
 	log := &captureLogger{}
 
 	r.recordDrop(log)
@@ -277,7 +277,7 @@ func TestDropReporterFirstDropLogsAndResets(t *testing.T) {
 // claimed, further drops within dropLogInterval accumulate in the counter
 // without emitting another log line.
 func TestDropReporterSuppressesWithinInterval(t *testing.T) {
-	r := newDropReporter()
+	r := newDropReporter("from non-allowlisted peers")
 	log := &captureLogger{}
 
 	// Anchor start in the past and force lastLog to "just now" (relative to
@@ -299,7 +299,7 @@ func TestDropReporterSuppressesWithinInterval(t *testing.T) {
 // TestDropReporterLogsAgainAfterIntervalElapses pins that a new window opens,
 // and logs, once dropLogInterval has passed since the last emitted line.
 func TestDropReporterLogsAgainAfterIntervalElapses(t *testing.T) {
-	r := newDropReporter()
+	r := newDropReporter("from non-allowlisted peers")
 	log := &captureLogger{}
 
 	// The prior line was emitted 1ns after start (non-zero, so this exercises
@@ -321,7 +321,7 @@ func TestDropReporterLogsAgainAfterIntervalElapses(t *testing.T) {
 // increments the shared counter (no lost counts), and exactly one goroutine
 // wins the right to log for the reporter's first window.
 func TestDropReporterConcurrentDropsAreRaceSafeAndNeverLoseACount(t *testing.T) {
-	r := newDropReporter()
+	r := newDropReporter("from non-allowlisted peers")
 	log := &captureLogger{}
 
 	const goroutines = 200
