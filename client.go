@@ -160,8 +160,8 @@ type client struct {
 	peerCacheSaveReq chan struct{}
 	// peerCacheSaveDelay is how long the writer coalesces save requests.
 	peerCacheSaveDelay time.Duration
-	// peerCacheWriter tracks the cache writer goroutine so Close can wait for
-	// it before its final save.
+	// peerCacheWriter tracks the cache writer goroutine and Close's final
+	// save, so Close can wait for both before closing the host.
 	peerCacheWriter sync.WaitGroup
 
 	// connNotifee watches connections for topic peers. It is registered once
@@ -736,6 +736,8 @@ func loadAndConnectCachedPeers(ctx context.Context, h host.Host, config Config, 
 		return
 	}
 
+	removeLeftoverTempFiles(config.PeerCacheFile, log)
+
 	cachedPeers := loadPeerCache(config.PeerCacheFile, peerCacheTTL(config), log)
 	if len(cachedPeers) > 0 {
 		log.Infof("Connecting to %d cached peers...", len(cachedPeers))
@@ -914,23 +916,23 @@ func (c *client) Close() error {
 		}
 		c.mu.Unlock()
 
-		// Wait for every reader to exit; each closes its own channel on the
-		// way out. Bounded so a reader stuck in a blocking user logger cannot
-		// hold the listening sockets open past the shutdown budget: after the
-		// wait budget the host is torn down anyway.
+		// Wait for every reader to exit, each closing its own channel on the
+		// way out, and for the peer cache savers, so they do not save into a
+		// closed host. Bounded so a reader or a saver stuck in a blocking user
+		// logger cannot hold the listening sockets open past the shutdown
+		// budget: after the wait budget the host is torn down anyway, and a
+		// stuck saver may still finish its write after Close returns.
 		readersDone := make(chan struct{})
 		go func() {
 			c.readers.Wait()
+			c.peerCacheWriter.Wait()
 			close(readersDone)
 		}()
 		select {
 		case <-readersDone:
 		case <-time.After(closeReadersWait):
-			c.logger.Warnf("Subscription readers did not exit within %s, tearing down host anyway", closeReadersWait)
+			c.logger.Warnf("Subscription readers or peer cache writer did not exit within %s, tearing down host anyway", closeReadersWait)
 		}
-
-		// The writer exits on cancel; wait so it never saves into a closed host.
-		c.peerCacheWriter.Wait()
 
 		c.mu.Lock()
 		// Close all topics
@@ -1348,6 +1350,14 @@ func (c *client) handleMalformedMessage(author peer.ID, topicName string, data [
 	}
 }
 
+// recordAuthor records a valid message from author. A connected peer's first
+// one qualifies it for the peer cache, so that requests a save.
+func (c *client) recordAuthor(author peer.ID) {
+	if c.peerTracker.recordMessageFrom(author) && c.host.Network().Connectedness(author) == network.Connected {
+		c.requestPeerCacheSave()
+	}
+}
+
 func (c *client) receiveMessages(sub *pubsub.Subscription, topic *pubsub.Topic, msgChan chan Message) {
 	for {
 		msg, err := sub.Next(c.ctx)
@@ -1387,7 +1397,7 @@ func (c *client) receiveMessages(sub *pubsub.Subscription, topic *pubsub.Topic, 
 		// The name is peer-controlled and otherwise bounded only by the pubsub
 		// message size; store and surface the sanitized form only.
 		name := c.peerTracker.updateName(author, m.Name)
-		c.peerTracker.recordMessageFrom(author)
+		c.recordAuthor(author)
 
 		// Send to channel
 		select {
@@ -1461,7 +1471,9 @@ func (c *client) flushPeerCache() {
 		return
 	}
 	saved := make(chan struct{})
+	c.peerCacheWriter.Add(1)
 	go func() {
+		defer c.peerCacheWriter.Done()
 		defer close(saved)
 		c.savePeerCache()
 	}()
@@ -1943,11 +1955,44 @@ func savePeerCache(peers []cachedPeer, cacheFile string, logger logger) {
 	}
 }
 
+// leftoverTempFileAge is how old a temporary cache file must be before it is
+// treated as left behind by a crash. Younger ones may belong to a writer that
+// is still running, in this process or another sharing the file.
+const leftoverTempFileAge = time.Minute
+
+// tempFilePrefix is the name prefix of writeFileAtomic's temporary files for
+// path.
+func tempFilePrefix(path string) string {
+	return filepath.Base(path) + ".tmp-"
+}
+
+// removeLeftoverTempFiles deletes temporary files writeFileAtomic left beside
+// path when the process died between writing one and renaming it.
+func removeLeftoverTempFiles(path string, log logger) {
+	dir, prefix := filepath.Dir(path), tempFilePrefix(path)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if !e.Type().IsRegular() || !strings.HasPrefix(e.Name(), prefix) {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil || time.Since(info.ModTime()) < leftoverTempFileAge {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, e.Name())); err != nil {
+			log.Warnf("Failed to remove leftover peer cache temp file: %v", err)
+		}
+	}
+}
+
 // writeFileAtomic writes data to a temporary file beside path and renames it
 // over path, so a concurrent reader or a crash never sees a partial file. The
 // file is created with mode 0600.
 func writeFileAtomic(path string, data []byte) error {
-	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-*")
+	tmp, err := os.CreateTemp(filepath.Dir(path), tempFilePrefix(path)+"*")
 	if err != nil {
 		return err
 	}

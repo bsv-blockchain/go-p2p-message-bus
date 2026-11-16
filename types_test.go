@@ -595,3 +595,19 @@ func TestPeerTrackerNewPeerSurvivesConnectedCap(t *testing.T) {
 	requireForgotten(t, tracker, newcomer)
 	requireForgotten(t, tracker, c1)
 }
+
+// recordMessageFrom reports the first valid message of a peer, including
+// after the peer was evicted and comes back.
+func TestPeerTrackerRecordMessageFromReportsFirstAuthored(t *testing.T) {
+	tracker, clock, _ := newBoundedTestTracker(100, time.Minute)
+	id := generateTestPeerID(t)
+
+	tracker.recordMalformed(id)
+	require.True(t, tracker.recordMessageFrom(id), "malformed messages do not make an author")
+	require.False(t, tracker.recordMessageFrom(id))
+
+	*clock = clock.Add(time.Minute)
+	tracker.recordMessageFrom(generateTestPeerID(t)) // evicts id
+	requireForgotten(t, tracker, id)
+	require.True(t, tracker.recordMessageFrom(id))
+}

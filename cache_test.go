@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -757,6 +758,14 @@ func newCacheTopicClients(t *testing.T, cacheFile string, saveInterval time.Dura
 		}
 	})
 
+	joinCacheTopic(t, a, b)
+	return a, b
+}
+
+// joinCacheTopic subscribes a and b to the shared topic and waits until b
+// sees a on it.
+func joinCacheTopic(t *testing.T, a, b *client) {
+	t.Helper()
 	a.Subscribe(peerCacheTopic)
 	b.Subscribe(peerCacheTopic)
 	require.Eventually(t, func() bool {
@@ -765,7 +774,6 @@ func newCacheTopicClients(t *testing.T, cacheFile string, saveInterval time.Dura
 		b.mu.RUnlock()
 		return ok && slices.Contains(tp.ListPeers(), a.host.ID())
 	}, eventuallyTimeout, eventuallyTick)
-	return a, b
 }
 
 // makeAuthor has a publish on the shared topic until b has received one of its
@@ -880,4 +888,114 @@ func TestSavePeerCacheSkipsSilentSubscribers(t *testing.T) {
 	require.Len(t, cached, 1)
 	require.Equal(t, a.host.ID().String(), cached[0].ID)
 	require.Equal(t, "peer-a", cached[0].Name)
+}
+
+// blockingLogger, once armed, blocks any Infof call whose message contains
+// block until release is closed, modelling a user logger that wedges.
+type blockingLogger struct {
+	DefaultLogger
+
+	block   string
+	armed   atomic.Bool
+	release chan struct{}
+	blocked chan struct{}
+	once    sync.Once
+}
+
+func (l *blockingLogger) Infof(format string, v ...any) {
+	if l.armed.Load() && strings.Contains(fmt.Sprintf(format, v...), l.block) {
+		l.once.Do(func() { close(l.blocked) })
+		<-l.release
+	}
+}
+
+// A writer stuck in a save (here in a wedged user logger) must not keep Close
+// from closing the host and its listening sockets.
+func TestCloseClosesHostWhileWriterIsStuck(t *testing.T) {
+	cacheFile := filepath.Join(t.TempDir(), testCacheFileName)
+	savePeerCache([]cachedPeer{
+		{ID: "stale-peer", Addrs: []string{testAddrRemote}, LastSeen: time.Now().Add(-48 * time.Hour)},
+	}, cacheFile, &DefaultLogger{})
+
+	log := &blockingLogger{block: "Evicted", release: make(chan struct{}), blocked: make(chan struct{})}
+
+	a, b := newConnectedClientsWith(t, eventuallyTimeout, func(name string, cfg *Config) {
+		if name == "peer-b" {
+			cfg.PeerCacheFile = cacheFile
+			cfg.Logger = log
+			cfg.peerCacheSaveInterval = 10 * time.Millisecond
+		}
+	})
+	// Unwedge the writer and let it finish its write before the temp dir goes.
+	t.Cleanup(func() {
+		close(log.release)
+		b.peerCacheWriter.Wait()
+	})
+	joinCacheTopic(t, a, b)
+	makeAuthor(t, a, b)
+
+	// Seed the stale entry again (startup already evicted it) so the next save
+	// logs an eviction, then wedge that log line.
+	b.peerCacheMu.Lock()
+	savePeerCache([]cachedPeer{
+		{ID: "stale-peer", Addrs: []string{testAddrRemote}, LastSeen: time.Now().Add(-48 * time.Hour)},
+	}, cacheFile, &DefaultLogger{})
+	log.armed.Store(true)
+	b.peerCacheMu.Unlock()
+
+	b.requestPeerCacheSave()
+	select {
+	case <-log.blocked:
+	case <-time.After(eventuallyTimeout):
+		t.Fatal("writer never reached the wedged log line")
+	}
+
+	listen := b.host.Network().ListenAddresses()
+	require.NoError(t, b.Close())
+
+	require.Eventually(t, func() bool { return len(b.host.Network().ListenAddresses()) == 0 }, time.Second, eventuallyTick,
+		"host still listening on %v after Close", listen)
+}
+
+// A connected topic peer that sends its first valid message after the last
+// save is persisted without waiting for another connection event.
+func TestNewAuthorRequestsPeerCacheSave(t *testing.T) {
+	const interval = 200 * time.Millisecond
+	cacheFile := filepath.Join(t.TempDir(), testCacheFileName)
+	a, b := newCacheTopicClients(t, cacheFile, interval)
+
+	// Let the save requested by the connection run while a is not an author.
+	time.Sleep(topicPeerConnectDelay + 2*interval)
+	require.NotContains(t, cachedPeerIDs(t, cacheFile), a.host.ID().String())
+
+	makeAuthor(t, a, b)
+	require.Eventually(t, func() bool {
+		return slices.Contains(cachedPeerIDs(t, cacheFile), a.host.ID().String())
+	}, 10*interval, eventuallyTick)
+}
+
+// Temporary files left by a crash between write and rename are removed when
+// the client starts; recent ones, which a live writer may own, are kept.
+func TestNewClientRemovesLeftoverCacheTempFiles(t *testing.T) {
+	dir := t.TempDir()
+	cacheFile := filepath.Join(dir, testCacheFileName)
+	old := time.Now().Add(-2 * leftoverTempFileAge)
+	leftover := cacheFile + ".tmp-123456"
+	require.NoError(t, os.WriteFile(leftover, []byte("partial"), 0o600))
+	require.NoError(t, os.Chtimes(leftover, old, old))
+	inFlight := cacheFile + ".tmp-654321" // fresh: may belong to a live writer
+	require.NoError(t, os.WriteFile(inFlight, []byte("partial"), 0o600))
+	unrelated := filepath.Join(dir, "other.tmp-1")
+	require.NoError(t, os.WriteFile(unrelated, []byte("keep"), 0o600))
+	require.NoError(t, os.Chtimes(unrelated, old, old))
+
+	newConnectedClientsWith(t, eventuallyTimeout, func(name string, cfg *Config) {
+		if name == "peer-b" {
+			cfg.PeerCacheFile = cacheFile
+		}
+	})
+
+	require.NoFileExists(t, leftover)
+	require.FileExists(t, inFlight)
+	require.FileExists(t, unrelated)
 }

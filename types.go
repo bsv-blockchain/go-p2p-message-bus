@@ -295,11 +295,15 @@ func (pt *peerTracker) getName(peerID peer.ID) string {
 	return "unknown"
 }
 
-func (pt *peerTracker) recordMessageFrom(peerID peer.ID) {
+// recordMessageFrom records a valid message from peerID and reports whether
+// it is the first one since the peer was last tracked as an author.
+func (pt *peerTracker) recordMessageFrom(peerID peer.ID) (firstAuthored bool) {
 	pt.mu.Lock()
 	defer pt.mu.Unlock()
 	pt.touchLocked(peerID)
+	firstAuthored = !pt.topicPeers[peerID]
 	pt.topicPeers[peerID] = true
+	return firstAuthored
 }
 
 // isAuthor reports whether peerID is tracked as the author of a valid message.
