@@ -93,7 +93,9 @@ const (
 	peerCacheSaveInterval = 30 * time.Second
 
 	// maxCachedPeers caps the peer cache, keeping the most recently seen peers.
-	maxCachedPeers = 1000
+	// Every cached peer is dialed at once on startup, so the cap stays near the
+	// connection manager's watermarks rather than the number of peers seen.
+	maxCachedPeers = 100
 
 	// peerAddressRequestWindow and peerAddressRequestsPerWindow bound how many
 	// inbound address requests a single peer may open; excess streams are reset.

@@ -793,7 +793,7 @@ func TestClientSavePeerCacheMergesExisting(t *testing.T) {
 
 // Any number of save requests within one interval produce a single write.
 func TestPeerCacheSaveRequestsCoalesce(t *testing.T) {
-	const interval = 300 * time.Millisecond
+	const interval = time.Second
 	cacheFile := filepath.Join(t.TempDir(), testCacheFileName)
 	_, b := newCacheTopicClients(t, cacheFile, interval)
 
@@ -803,17 +803,17 @@ func TestPeerCacheSaveRequestsCoalesce(t *testing.T) {
 	}
 
 	// Let saves triggered while the connection was set up land first.
-	time.Sleep(time.Second + 2*interval)
+	time.Sleep(topicPeerConnectDelay + 2*interval)
 	_ = os.Remove(cacheFile)
 
 	for i := 0; i < 50; i++ {
 		b.requestPeerCacheSave()
 	}
-	require.Never(t, exists, interval/2, eventuallyTick, "save must wait for the interval")
+	require.Never(t, exists, interval/3, eventuallyTick, "save must wait for the interval")
 	require.Eventually(t, exists, eventuallyTimeout, eventuallyTick)
 
 	require.NoError(t, os.Remove(cacheFile))
-	require.Never(t, exists, 3*interval, eventuallyTick, "requests must coalesce into one write")
+	require.Never(t, exists, 2*interval, eventuallyTick, "requests must coalesce into one write")
 }
 
 // Close writes a pending save instead of dropping it.
