@@ -1,7 +1,9 @@
 package p2p
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -742,6 +744,8 @@ func TestMergePeerCache(t *testing.T) {
 	})
 }
 
+const peerCacheTopic = "peer-cache-topic"
+
 // newCacheTopicClients connects two clients on a shared topic; b persists its
 // peer cache to cacheFile and coalesces saves over saveInterval.
 func newCacheTopicClients(t *testing.T, cacheFile string, saveInterval time.Duration) (a, b *client) {
@@ -753,16 +757,25 @@ func newCacheTopicClients(t *testing.T, cacheFile string, saveInterval time.Dura
 		}
 	})
 
-	const topic = "peer-cache-topic"
-	a.Subscribe(topic)
-	b.Subscribe(topic)
+	a.Subscribe(peerCacheTopic)
+	b.Subscribe(peerCacheTopic)
 	require.Eventually(t, func() bool {
 		b.mu.RLock()
-		tp, ok := b.topics[topic]
+		tp, ok := b.topics[peerCacheTopic]
 		b.mu.RUnlock()
 		return ok && slices.Contains(tp.ListPeers(), a.host.ID())
 	}, eventuallyTimeout, eventuallyTick)
 	return a, b
+}
+
+// makeAuthor has a publish on the shared topic until b has received one of its
+// messages, which is what qualifies a for b's peer cache.
+func makeAuthor(t *testing.T, a, b *client) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		require.NoError(t, a.Publish(context.Background(), peerCacheTopic, []byte("hello")))
+		return b.peerTracker.isAuthor(a.host.ID())
+	}, eventuallyTimeout, 100*time.Millisecond)
 }
 
 func cachedPeerIDs(t *testing.T, cacheFile string) []string {
@@ -786,6 +799,7 @@ func TestClientSavePeerCacheMergesExisting(t *testing.T) {
 	}, cacheFile, &DefaultLogger{})
 
 	a, b := newCacheTopicClients(t, cacheFile, time.Hour)
+	makeAuthor(t, a, b)
 	b.savePeerCache()
 
 	require.ElementsMatch(t, []string{testPeerID1, a.host.ID().String()}, cachedPeerIDs(t, cacheFile))
@@ -795,7 +809,8 @@ func TestClientSavePeerCacheMergesExisting(t *testing.T) {
 func TestPeerCacheSaveRequestsCoalesce(t *testing.T) {
 	const interval = time.Second
 	cacheFile := filepath.Join(t.TempDir(), testCacheFileName)
-	_, b := newCacheTopicClients(t, cacheFile, interval)
+	a, b := newCacheTopicClients(t, cacheFile, interval)
+	makeAuthor(t, a, b)
 
 	exists := func() bool {
 		_, err := os.Stat(cacheFile)
@@ -820,9 +835,49 @@ func TestPeerCacheSaveRequestsCoalesce(t *testing.T) {
 func TestClosePersistsPeerCache(t *testing.T) {
 	cacheFile := filepath.Join(t.TempDir(), testCacheFileName)
 	a, b := newCacheTopicClients(t, cacheFile, time.Hour)
+	makeAuthor(t, a, b)
 
 	b.requestPeerCacheSave()
 	require.NoError(t, b.Close())
 
 	require.Contains(t, cachedPeerIDs(t, cacheFile), a.host.ID().String())
+}
+
+// A second Close racing the first must not cancel the client under the first
+// one's final save.
+func TestConcurrentClosePersistsPeerCache(t *testing.T) {
+	cacheFile := filepath.Join(t.TempDir(), testCacheFileName)
+	a, b := newCacheTopicClients(t, cacheFile, time.Hour)
+	makeAuthor(t, a, b)
+
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	for i := range errs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs[i] = b.Close()
+		}()
+	}
+	wg.Wait()
+	require.NoError(t, errors.Join(errs...))
+
+	require.Contains(t, cachedPeerIDs(t, cacheFile), a.host.ID().String())
+}
+
+// A connected peer that only announced a subscription is not cached: the
+// announcement is free, so it must not let a peer displace real ones.
+func TestSavePeerCacheSkipsSilentSubscribers(t *testing.T) {
+	cacheFile := filepath.Join(t.TempDir(), testCacheFileName)
+	a, b := newCacheTopicClients(t, cacheFile, time.Hour)
+
+	b.savePeerCache()
+	require.NotContains(t, cachedPeerIDs(t, cacheFile), a.host.ID().String())
+
+	makeAuthor(t, a, b)
+	b.savePeerCache()
+	cached := loadPeerCache(cacheFile, -1, &DefaultLogger{})
+	require.Len(t, cached, 1)
+	require.Equal(t, a.host.ID().String(), cached[0].ID)
+	require.Equal(t, "peer-a", cached[0].Name)
 }

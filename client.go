@@ -167,6 +167,10 @@ type client struct {
 	// connNotifee watches connections for topic peers. It is registered once
 	// per client and removed on Close.
 	connNotifee *network.NotifyBundle
+	// shutdownOnce runs the pre-cancel part of Close exactly once, so a
+	// concurrent second Close waits for the final cache save instead of
+	// cancelling the context under it.
+	shutdownOnce sync.Once
 }
 
 // NewClient creates and initializes a new P2P client.
@@ -295,7 +299,7 @@ func NewClient(config Config) (Client, error) {
 
 	c.connNotifee = &network.NotifyBundle{
 		ConnectedF:    func(_ network.Network, conn network.Conn) { go c.onConnected(conn) },
-		DisconnectedF: func(_ network.Network, conn network.Conn) { c.onDisconnected(conn) },
+		DisconnectedF: func(_ network.Network, conn network.Conn) { go c.onDisconnected(conn) },
 	}
 	h.Network().Notify(c.connNotifee)
 
@@ -888,14 +892,13 @@ const (
 // it is about to send on. Safe to call more than once.
 func (c *client) Close() error {
 	c.mu.Lock()
-	alreadyClosed := c.closed
 	c.closed = true
 	c.mu.Unlock()
 
-	if !alreadyClosed {
+	c.shutdownOnce.Do(func() {
 		c.host.Network().StopNotify(c.connNotifee)
 		c.flushPeerCache()
-	}
+	})
 
 	c.cancel()
 
@@ -1425,7 +1428,9 @@ func (c *client) onConnected(conn network.Conn) {
 	c.requestPeerCacheSave()
 }
 
-// onDisconnected logs the loss of the last connection to a topic peer.
+// onDisconnected logs the loss of the last connection to a topic peer. It runs
+// on its own goroutine: libp2p delivers connection events from one loop, and
+// the ListPeers round trips here must not hold it up.
 func (c *client) onDisconnected(conn network.Conn) {
 	peerID := conn.RemotePeer()
 	if c.host.Network().Connectedness(peerID) == network.Connected || !c.isTopicPeer(peerID) {
@@ -1505,7 +1510,9 @@ func (c *client) runPeerCacheWriter(ctx context.Context) {
 	}
 }
 
-// savePeerCache merges the topic peers connected now into the cache file.
+// savePeerCache merges the connected topic peers that have sent a valid
+// message into the cache file. Announcing a subscription alone is free, so it
+// does not earn a place in the cache.
 // Entries for peers not connected now are kept until they are older than the
 // cache TTL.
 func (c *client) savePeerCache() {
@@ -1533,6 +1540,9 @@ func (c *client) savePeerCache() {
 	now := time.Now()
 
 	for p := range peerSet {
+		if !c.peerTracker.isAuthor(p) {
+			continue
+		}
 		if conns := c.host.Network().ConnsToPeer(p); len(conns) > 0 {
 			var addrs []string
 			for _, conn := range conns {

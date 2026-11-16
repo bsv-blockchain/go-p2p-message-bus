@@ -141,10 +141,13 @@ const (
 // least recently active one out. Peers isConnected reports as connected are
 // never forgotten.
 type peerTracker struct {
-	mu            sync.RWMutex
-	names         map[peer.ID]string
-	topicPeers    map[peer.ID]bool
-	lastSeen      map[peer.ID]time.Time // last message of any kind, valid or malformed
+	mu         sync.RWMutex
+	names      map[peer.ID]string
+	topicPeers map[peer.ID]bool
+	// lastSeen is the last message of any kind, valid or malformed, except that
+	// messages from a peer in skipMalformed are dropped before they are
+	// recorded: a skipped peer ages out after ttl and is then judged afresh.
+	lastSeen      map[peer.ID]time.Time
 	malformed     map[peer.ID]int
 	skipMalformed map[peer.ID]bool
 
@@ -297,6 +300,13 @@ func (pt *peerTracker) recordMessageFrom(peerID peer.ID) {
 	defer pt.mu.Unlock()
 	pt.touchLocked(peerID)
 	pt.topicPeers[peerID] = true
+}
+
+// isAuthor reports whether peerID is tracked as the author of a valid message.
+func (pt *peerTracker) isAuthor(peerID peer.ID) bool {
+	pt.mu.RLock()
+	defer pt.mu.RUnlock()
+	return pt.topicPeers[peerID]
 }
 
 // getAllTopicPeers returns every tracked author of a valid message that is

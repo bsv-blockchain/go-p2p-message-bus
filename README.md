@@ -261,7 +261,8 @@ client, err := p2p.NewPeer(p2p.Config{
 When enabled:
 - Connected topic peers are saved to the specified file, at most once every 30 seconds
 - Each save merges into the existing file: peers not connected right now are kept until they are older than `PeerCacheTTL` (default 24h), and the newest 100 peers are kept
-- The file is replaced atomically, and once more on `Close`
+- Only peers that have sent a valid message are cached; announcing a topic subscription is not enough
+- The file is replaced atomically (written to a temporary file in the same directory, then renamed), so its directory must be writable; it is also saved once more on `Close`
 - On restart, the client will reconnect to previously known peers
 - This significantly speeds up network reconnection
 - If not provided, peer caching is disabled
