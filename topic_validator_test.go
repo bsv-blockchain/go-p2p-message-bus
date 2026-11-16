@@ -162,7 +162,6 @@ func TestPublishRejectedByLocalTopicValidator(t *testing.T) {
 	cl, err := NewClient(Config{
 		Name:            testPeerName,
 		PrivateKey:      privKey,
-		DHTMode:         "off",
 		TopicValidators: map[string]TopicValidator{topic: {MaxPayloadSize: 16}},
 	})
 	require.NoError(t, err)
@@ -238,7 +237,6 @@ func TestPublishWithLongNameFitsTopicValidator(t *testing.T) {
 	cl, err := NewClient(Config{
 		Name:            strings.Repeat("<", 1000), // JSON-escaped to 6 bytes each
 		PrivateKey:      privKey,
-		DHTMode:         "off",
 		TopicValidators: map[string]TopicValidator{topic: {MaxPayloadSize: 16}},
 	})
 	require.NoError(t, err)
