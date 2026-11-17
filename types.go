@@ -1,6 +1,7 @@
 package p2p
 
 import (
+	"container/list"
 	"context"
 	"strings"
 	"sync"
@@ -21,7 +22,9 @@ type Client interface {
 	// Publish publishes a message to the specified topic.
 	Publish(ctx context.Context, topic string, data []byte) error
 
-	// GetPeers returns information about all known peers on subscribed topics.
+	// GetPeers returns the peers that authored a message on a joined topic and
+	// are connected now or were heard from within the last hour. At most 10,000
+	// such authors are tracked; connected ones are always kept.
 	GetPeers() []PeerInfo
 
 	// GetID returns this peer's ID as a string.
@@ -123,25 +126,104 @@ func (l *peerAddressLimiter) allow(peerID peer.ID, now time.Time) (allowed, firs
 	return true, false
 }
 
+// maxTrackedPeers and trackedPeerTTL bound the peerTracker. Message authors
+// are attacker-chosen (one connection can relay messages from any number of
+// freshly minted identities), so without a bound every new author would add
+// entries that are never reclaimed. Connected peers are exempt from both.
+const (
+	maxTrackedPeers = 10_000
+	trackedPeerTTL  = time.Hour
+)
+
+// peerTracker records what is known about message authors. Every tracked peer
+// sits in order, most recently active at the front; a peer is forgotten from
+// every map at once when it has been silent for ttl or when the cap forces the
+// least recently active one out. Peers isConnected reports as connected are
+// never forgotten.
 type peerTracker struct {
-	mu            sync.RWMutex
-	names         map[peer.ID]string
-	isRelaying    map[string]bool
-	topicPeers    map[peer.ID]bool
+	mu         sync.RWMutex
+	names      map[peer.ID]string
+	topicPeers map[peer.ID]bool
+	// lastSeen is the last message of any kind, valid or malformed, except that
+	// messages from a peer in skipMalformed are dropped before they are
+	// recorded: a skipped peer ages out after ttl and is then judged afresh.
 	lastSeen      map[peer.ID]time.Time
 	malformed     map[peer.ID]int
 	skipMalformed map[peer.ID]bool
+
+	order *list.List // of peer.ID
+	elems map[peer.ID]*list.Element
+
+	maxPeers    int
+	ttl         time.Duration
+	now         func() time.Time
+	isConnected func(peer.ID) bool
 }
 
 func newPeerTracker() *peerTracker {
 	return &peerTracker{
 		names:         make(map[peer.ID]string),
-		isRelaying:    make(map[string]bool),
 		topicPeers:    make(map[peer.ID]bool),
 		lastSeen:      make(map[peer.ID]time.Time),
 		malformed:     make(map[peer.ID]int),
 		skipMalformed: make(map[peer.ID]bool),
+		order:         list.New(),
+		elems:         make(map[peer.ID]*list.Element),
+		maxPeers:      maxTrackedPeers,
+		ttl:           trackedPeerTTL,
+		now:           time.Now,
+		isConnected:   func(peer.ID) bool { return false },
 	}
+}
+
+// touchLocked marks peerID as active now, tracking it if it is new, and evicts
+// whatever the cap or TTL no longer allows. Callers hold pt.mu for writing.
+func (pt *peerTracker) touchLocked(peerID peer.ID) {
+	now := pt.now()
+	pt.lastSeen[peerID] = now
+	if e, ok := pt.elems[peerID]; ok {
+		pt.order.MoveToFront(e)
+	} else {
+		pt.elems[peerID] = pt.order.PushFront(peerID)
+	}
+	pt.evictLocked(now, peerID)
+}
+
+// evictLocked forgets peers from the back of order while they are expired or
+// the tracker is over its cap. A connected peer found there is moved to the
+// front instead, so the loop visits each peer at most once per call. keep, the
+// peer being touched, is never evicted: reaching it means every other peer is
+// connected, and the cap yields.
+func (pt *peerTracker) evictLocked(now time.Time, keep peer.ID) {
+	for n := pt.order.Len(); n > 0; n-- {
+		back := pt.order.Back()
+		id := back.Value.(peer.ID)
+		if id == keep || (pt.order.Len() <= pt.maxPeers && !pt.expiredLocked(id, now)) {
+			return
+		}
+		if pt.isConnected(id) {
+			pt.order.MoveToFront(back)
+			continue
+		}
+		pt.forgetLocked(id)
+	}
+}
+
+func (pt *peerTracker) expiredLocked(peerID peer.ID, now time.Time) bool {
+	return now.Sub(pt.lastSeen[peerID]) >= pt.ttl
+}
+
+// forgetLocked removes peerID from every map. Callers hold pt.mu for writing.
+func (pt *peerTracker) forgetLocked(peerID peer.ID) {
+	if e, ok := pt.elems[peerID]; ok {
+		pt.order.Remove(e)
+		delete(pt.elems, peerID)
+	}
+	delete(pt.names, peerID)
+	delete(pt.topicPeers, peerID)
+	delete(pt.lastSeen, peerID)
+	delete(pt.malformed, peerID)
+	delete(pt.skipMalformed, peerID)
 }
 
 // recordMalformed increments the malformed message count for a peer.
@@ -150,6 +232,7 @@ func newPeerTracker() *peerTracker {
 func (pt *peerTracker) recordMalformed(peerID peer.ID) (count int, justSkipped bool) {
 	pt.mu.Lock()
 	defer pt.mu.Unlock()
+	pt.touchLocked(peerID)
 	pt.malformed[peerID]++
 	c := pt.malformed[peerID]
 	if c >= malformedThreshold && !pt.skipMalformed[peerID] {
@@ -172,6 +255,7 @@ func (pt *peerTracker) updateName(peerID peer.ID, name string) string {
 	name = sanitizePeerName(name)
 	pt.mu.Lock()
 	defer pt.mu.Unlock()
+	pt.touchLocked(peerID)
 	pt.names[peerID] = name
 	return name
 }
@@ -211,18 +295,35 @@ func (pt *peerTracker) getName(peerID peer.ID) string {
 	return "unknown"
 }
 
-func (pt *peerTracker) recordMessageFrom(peerID peer.ID) {
+// recordMessageFrom records a valid message from peerID and reports whether
+// it is the first one since the peer was last tracked as an author.
+func (pt *peerTracker) recordMessageFrom(peerID peer.ID) (firstAuthored bool) {
 	pt.mu.Lock()
 	defer pt.mu.Unlock()
+	pt.touchLocked(peerID)
+	firstAuthored = !pt.topicPeers[peerID]
 	pt.topicPeers[peerID] = true
-	pt.lastSeen[peerID] = time.Now()
+	return firstAuthored
 }
 
+// isAuthor reports whether peerID is tracked as the author of a valid message.
+func (pt *peerTracker) isAuthor(peerID peer.ID) bool {
+	pt.mu.RLock()
+	defer pt.mu.RUnlock()
+	return pt.topicPeers[peerID]
+}
+
+// getAllTopicPeers returns every tracked author of a valid message that is
+// connected or has been active within the TTL.
 func (pt *peerTracker) getAllTopicPeers() []peer.ID {
 	pt.mu.RLock()
 	defer pt.mu.RUnlock()
+	now := pt.now()
 	peers := make([]peer.ID, 0, len(pt.topicPeers))
 	for peerID := range pt.topicPeers {
+		if pt.expiredLocked(peerID, now) && !pt.isConnected(peerID) {
+			continue
+		}
 		peers = append(peers, peerID)
 	}
 	return peers

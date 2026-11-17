@@ -66,7 +66,8 @@ type Config struct {
 	Port int
 
 	// PeerCacheTTL is the duration after which unseen peers are removed from the cache.
-	// Peers not seen for longer than this duration will be evicted on next cache load.
+	// Peers not seen for longer than this duration are dropped when the cache is
+	// loaded or saved.
 	// If not provided or zero, defaults to 24 hours (same as go-ethereum).
 	// Set to a negative value to disable TTL-based eviction.
 	PeerCacheTTL time.Duration
@@ -207,6 +208,11 @@ type Config struct {
 	// peer-address exchange. Zero means the default. Tests shorten it; it is
 	// unexported because production peers must agree on the default.
 	peerAddressStreamTimeout time.Duration
+
+	// peerCacheSaveInterval overrides how long peer cache save requests are
+	// coalesced before one write. Zero means peerCacheSaveInterval. Tests
+	// shorten it.
+	peerCacheSaveInterval time.Duration
 
 	// DHTCleanupInterval is the interval at which the DHT's ProviderManager performs
 	// garbage collection of expired provider records. The cleanup involves querying all
