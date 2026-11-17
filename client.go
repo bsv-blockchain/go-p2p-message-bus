@@ -157,6 +157,11 @@ func NewClient(config Config) (Client, error) {
 		return nil, ErrPrivateKeyRequired
 	}
 
+	if err := validateValidationConfig(config); err != nil {
+		cancel()
+		return nil, err
+	}
+
 	// Parsed exactly once here and reused for every consumer - dialing below and
 	// the GossipSub direct-peer set. Parsing StaticPeers again would resolve
 	// dnsaddr entries via an uncancellable DNS lookup a second time, and could
@@ -217,6 +222,12 @@ func NewClient(config Config) (Client, error) {
 		_ = h.Close()
 		cancel()
 		return nil, fmt.Errorf("failed to create pubsub: %w", err)
+	}
+
+	if err := registerTopicValidators(ps, config, allowlist, clientLogger); err != nil {
+		_ = h.Close()
+		cancel()
+		return nil, err
 	}
 
 	// Set up mDNS discovery (only if explicitly enabled)
@@ -801,16 +812,9 @@ func (c *client) Publish(ctx context.Context, topic string, data []byte) error {
 		c.mu.Unlock()
 	}
 
-	// Wrap data with metadata
-	msg := struct {
-		Name string `json:"name"`
-		Data []byte `json:"data"`
-	}{
-		Name: c.config.Name,
-		Data: data,
-	}
-
-	msgBytes, err := json.Marshal(msg)
+	// Send the name as receivers keep it: sanitizing bounds its encoded size,
+	// so it cannot push a payload over a peer's topic validator limit.
+	msgBytes, err := json.Marshal(envelope{Name: sanitizePeerName(c.config.Name), Data: data})
 	if err != nil {
 		return fmt.Errorf("failed to marshal message: %w", err)
 	}
@@ -1322,12 +1326,8 @@ func (c *client) receiveMessages(sub *pubsub.Subscription, topic *pubsub.Topic, 
 			continue
 		}
 
-		// Unmarshal message
-		var m struct {
-			Name string `json:"name"`
-			Data []byte `json:"data"`
-		}
-		if err := json.Unmarshal(msg.Data, &m); err != nil {
+		m, err := envelopeOf(msg)
+		if err != nil {
 			c.handleMalformedMessage(author, topic.String(), msg.Data, err)
 			continue
 		}

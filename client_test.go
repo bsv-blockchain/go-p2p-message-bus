@@ -393,19 +393,19 @@ func TestClientPublishWithContext(t *testing.T) {
 }
 
 func TestGetLoggerDefault(t *testing.T) {
-	logger := getLogger(nil)
+	got := getLogger(nil)
 
-	require.NotNil(t, logger)
-	assert.IsType(t, &DefaultLogger{}, logger)
+	require.NotNil(t, got)
+	assert.IsType(t, &DefaultLogger{}, got)
 }
 
 func TestGetLoggerCustom(t *testing.T) {
 	customLogger := &DefaultLogger{}
 
-	logger := getLogger(customLogger)
+	got := getLogger(customLogger)
 
-	require.NotNil(t, logger)
-	assert.Equal(t, customLogger, logger)
+	require.NotNil(t, got)
+	assert.Equal(t, customLogger, got)
 }
 
 func TestParseBootstrapPeersEmpty(t *testing.T) {

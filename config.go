@@ -322,4 +322,33 @@ type Config struct {
 	// it in a PRUNE. Set this to true as an interim mitigation when peer scoring is not
 	// enabled. Default: false (peer exchange enabled).
 	DisablePeerExchange bool
+
+	// TopicValidators optionally validates messages per topic before GossipSub
+	// delivers or forwards them. The key is the topic name exactly as passed to
+	// Subscribe and Publish. Without a validator a topic accepts any signed
+	// message up to the pubsub wire limit and relays it to its mesh peers before
+	// the subscriber ever sees it, so caps applied after Subscribe protect only
+	// this node, never the network.
+	//
+	// Each validator bounds the payload size and may run a further check; see
+	// TopicValidator. A failing message is rejected (ValidationReject), so it is
+	// neither delivered nor forwarded. With peer scoring on, pubsub charges the
+	// rejection to the peer that forwarded the message, and only on topics whose
+	// TopicScoreParams weight invalid deliveries. Messages the AllowedPublisherIDs
+	// filter drops are ignored, never rejected. Local publishes pass the same
+	// validator, and a rejected Publish returns a pubsub.ValidationError.
+	// Rejections are logged as one aggregate line per topic per interval.
+	TopicValidators map[string]TopicValidator
+
+	// MaxMessageSize optionally overrides the pubsub wire limit (default 1MiB,
+	// pubsub.DefaultMaxMessageSize). Zero keeps the default.
+	//
+	// This limit bounds whole RPC frames, not single messages: a peer packs
+	// several messages, IWANT replies and control traffic into one frame, sized
+	// by its own limit. A frame over this node's limit resets the stream from
+	// that peer, dropping everything in flight on it. Lowering it below what
+	// other peers on the network use therefore loses legitimate traffic. Use
+	// TopicValidators to bound message sizes; lower this only on a network where
+	// every peer runs the same, lower limit.
+	MaxMessageSize int
 }
