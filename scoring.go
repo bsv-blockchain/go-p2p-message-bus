@@ -176,7 +176,8 @@ func buildPubSubOptions(config Config, allowlist *peerAllowlist, staticPeers []p
 	// call the same logger on every event), so it is not a new constraint.
 	if allowlist.enabled() {
 		opts = append(opts, pubsub.WithDefaultValidator(
-			allowlistValidator(allowlist, log), pubsub.WithValidatorInline(true)))
+			allowlistValidator(allowlist, log), pubsub.WithValidatorInline(true),
+		))
 	}
 
 	if config.DisablePeerExchange {
