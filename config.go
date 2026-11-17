@@ -67,7 +67,8 @@ type Config struct {
 	Port int
 
 	// PeerCacheTTL is the duration after which unseen peers are removed from the cache.
-	// Peers not seen for longer than this duration will be evicted on next cache load.
+	// Peers not seen for longer than this duration are dropped when the cache is
+	// loaded or saved.
 	// If not provided or zero, defaults to 24 hours (same as go-ethereum).
 	// Set to a negative value to disable TTL-based eviction.
 	PeerCacheTTL time.Duration
@@ -209,6 +210,11 @@ type Config struct {
 	// unexported because production peers must agree on the default.
 	peerAddressStreamTimeout time.Duration
 
+	// peerCacheSaveInterval overrides how long peer cache save requests are
+	// coalesced before one write. Zero means peerCacheSaveInterval. Tests
+	// shorten it.
+	peerCacheSaveInterval time.Duration
+
 	// DHTCleanupInterval is the interval at which the DHT's ProviderManager performs
 	// garbage collection of expired provider records. The cleanup involves querying all
 	// provider records and removing expired entries.
@@ -342,4 +348,33 @@ type Config struct {
 	// it in a PRUNE. Set this to true as an interim mitigation when peer scoring is not
 	// enabled. Default: false (peer exchange enabled).
 	DisablePeerExchange bool
+
+	// TopicValidators optionally validates messages per topic before GossipSub
+	// delivers or forwards them. The key is the topic name exactly as passed to
+	// Subscribe and Publish. Without a validator a topic accepts any signed
+	// message up to the pubsub wire limit and relays it to its mesh peers before
+	// the subscriber ever sees it, so caps applied after Subscribe protect only
+	// this node, never the network.
+	//
+	// Each validator bounds the payload size and may run a further check; see
+	// TopicValidator. A failing message is rejected (ValidationReject), so it is
+	// neither delivered nor forwarded. With peer scoring on, pubsub charges the
+	// rejection to the peer that forwarded the message, and only on topics whose
+	// TopicScoreParams weight invalid deliveries. Messages the AllowedPublisherIDs
+	// filter drops are ignored, never rejected. Local publishes pass the same
+	// validator, and a rejected Publish returns a pubsub.ValidationError.
+	// Rejections are logged as one aggregate line per topic per interval.
+	TopicValidators map[string]TopicValidator
+
+	// MaxMessageSize optionally overrides the pubsub wire limit (default 1MiB,
+	// pubsub.DefaultMaxMessageSize). Zero keeps the default.
+	//
+	// This limit bounds whole RPC frames, not single messages: a peer packs
+	// several messages, IWANT replies and control traffic into one frame, sized
+	// by its own limit. A frame over this node's limit resets the stream from
+	// that peer, dropping everything in flight on it. Lowering it below what
+	// other peers on the network use therefore loses legitimate traffic. Use
+	// TopicValidators to bound message sizes; lower this only on a network where
+	// every peer runs the same, lower limit.
+	MaxMessageSize int
 }

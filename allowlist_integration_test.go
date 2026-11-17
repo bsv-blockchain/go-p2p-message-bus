@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/stretchr/testify/require"
@@ -227,8 +226,10 @@ func requireCStaysFilteredAtA(t *testing.T, chA, chB <-chan Message, idC peer.ID
 	}
 }
 
-// newLineTopologyClient builds one node of TestAllowlistFiltersForwardedAuthor
-// and registers its shutdown.
+// newLineTopologyClient builds one node of a line-topology test
+// (TestAllowlistFiltersForwardedAuthor, TestTopicValidatorRejectsBeforeRelay)
+// from config, forcing loopback-friendly networking with the DHT off, and
+// registers its shutdown.
 //
 // DHT is off for every node in that test, and deliberately so: with the DHT in
 // its default server mode the nodes advertise the topic to each other and
@@ -238,18 +239,14 @@ func requireCStaysFilteredAtA(t *testing.T, chA, chB <-chan Message, idC peer.ID
 // left is attemptDirectConnectionsToTopicPeers, which walks peerTracker's topic
 // peers - and A never records C there, because peerTracker is only written from
 // receiveMessages, which C's filtered messages never reach.
-func newLineTopologyClient(t *testing.T, name string, key crypto.PrivKey, allowedPublishers []string, log logger) Client {
+func newLineTopologyClient(t *testing.T, config Config) Client {
 	t.Helper()
 
-	cl, err := NewClient(Config{
-		Name:                name,
-		PrivateKey:          key,
-		Port:                0,
-		AllowPrivateIPs:     true,
-		DHTMode:             "off",
-		AllowedPublisherIDs: allowedPublishers,
-		Logger:              log,
-	})
+	config.Port = 0
+	config.AllowPrivateIPs = true
+	config.DHTMode = "off"
+
+	cl, err := NewClient(config)
 	require.NoError(t, err)
 
 	t.Cleanup(func() {
@@ -297,9 +294,9 @@ func TestAllowlistFiltersForwardedAuthor(t *testing.T) {
 	// dropped, C's messages.
 	logA := &captureLogger{}
 
-	clA := newLineTopologyClient(t, "peer-a", keyA, []string{idB.String()}, logA)
-	clB := newLineTopologyClient(t, "peer-b", keyB, nil, &captureLogger{})
-	clC := newLineTopologyClient(t, "peer-c", keyC, nil, &captureLogger{})
+	clA := newLineTopologyClient(t, Config{Name: "peer-a", PrivateKey: keyA, AllowedPublisherIDs: []string{idB.String()}, Logger: logA})
+	clB := newLineTopologyClient(t, Config{Name: "peer-b", PrivateKey: keyB, Logger: &captureLogger{}})
+	clC := newLineTopologyClient(t, Config{Name: "peer-c", PrivateKey: keyC, Logger: &captureLogger{}})
 
 	chA := clA.Subscribe(topicName)
 	require.NotNil(t, chA)
