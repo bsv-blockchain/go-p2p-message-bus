@@ -15,6 +15,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// dhtModeOff is the DHTMode value that disables the DHT (topic-only mode).
+const dhtModeOff = "off"
+
 // TestDiscoverNowChannelInitialized verifies that the discoverNow channel
 // is created during NewClient and is buffered with capacity 1.
 func TestDiscoverNowChannelInitialized(t *testing.T) {
@@ -63,7 +66,7 @@ func TestRoutingDiscoveryNilWhenDHTOff(t *testing.T) {
 	cl, err := NewClient(Config{
 		Name:       testPeerName,
 		PrivateKey: privKey,
-		DHTMode:    "off",
+		DHTMode:    dhtModeOff,
 	})
 	require.NoError(t, err)
 	defer func() {
@@ -311,7 +314,7 @@ func TestDiscoverNowChannelDHTOff(t *testing.T) {
 	cl, err := NewClient(Config{
 		Name:       testPeerName,
 		PrivateKey: privKey,
-		DHTMode:    "off",
+		DHTMode:    dhtModeOff,
 	})
 	require.NoError(t, err)
 	defer func() {
@@ -421,7 +424,7 @@ func TestFindAndConnectPeersCancelsLookupWhenReaderStops(t *testing.T) {
 	cl, err := NewClient(Config{
 		Name:       testPeerName,
 		PrivateKey: privKey,
-		DHTMode:    "off",
+		DHTMode:    dhtModeOff,
 	})
 	require.NoError(t, err)
 	defer func() {
@@ -476,7 +479,7 @@ func TestFindAndConnectPeersCancelsLookupWhenChannelCloses(t *testing.T) {
 	cl, err := NewClient(Config{
 		Name:       testPeerName,
 		PrivateKey: privKey,
-		DHTMode:    "off",
+		DHTMode:    dhtModeOff,
 	})
 	require.NoError(t, err)
 	defer func() {

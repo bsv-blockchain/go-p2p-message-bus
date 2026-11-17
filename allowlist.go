@@ -74,7 +74,7 @@ func newPeerAllowlist(config Config, selfID peer.ID, log logger) (*peerAllowlist
 	log.Infof("Peer allowlist enabled: accepting pubsub messages from %d peer(s) - %d configured, %d for this node, %d from StaticPeers",
 		len(allowed), configured, fromSelf, fromStatic)
 
-	return &peerAllowlist{allowed: allowed, drops: newDropReporter()}, nil
+	return &peerAllowlist{allowed: allowed, drops: newDropReporter("from non-allowlisted peers")}, nil
 }
 
 // enabled reports whether the allowlist restricts anything. A nil allowlist is
@@ -185,6 +185,7 @@ const dropLogInterval = 30 * time.Second
 //
 // The zero value is NOT supported: construct with newDropReporter.
 type dropReporter struct {
+	subject string // what was dropped, completing "Dropped N message(s) <subject>"
 	dropped atomic.Uint64
 	lastLog atomic.Int64 // nanoseconds since start when the last line was emitted; zero means no line has been emitted yet
 	start   time.Time    // anchor for lastLog's elapsed-time comparisons. time.Since(start) reads Go's monotonic clock, so drop logging is immune to wall-clock steps (NTP corrections, manual changes) that would otherwise suppress it for an arbitrary period. Must be set via newDropReporter; see there for why the zero value is not merely a shifted anchor.
@@ -202,8 +203,8 @@ type dropReporter struct {
 // dropLogInterval and returns. The clock is frozen, not offset. dropReporter
 // is embedded by value in peerAllowlist, so this failure mode is one forgotten
 // field away, with no compile-time signal.
-func newDropReporter() dropReporter {
-	return dropReporter{start: time.Now()}
+func newDropReporter(subject string) dropReporter {
+	return dropReporter{subject: subject, start: time.Now()}
 }
 
 // recordDrop records one dropped message. The counter is incremented
@@ -248,5 +249,5 @@ func (r *dropReporter) recordDrop(log logger) {
 	}
 
 	count := r.dropped.Swap(0)
-	log.Infof("Dropped %d message(s) from non-allowlisted peers since the last report", count)
+	log.Infof("Dropped %d message(s) %s since the last report", count, r.subject)
 }

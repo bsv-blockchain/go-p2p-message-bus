@@ -8,7 +8,7 @@
 
 <a href="https://github.com/bsv-blockchain/go-p2p-message-bus/releases"><img src="https://img.shields.io/github/release-pre/bsv-blockchain/go-p2p-message-bus?include_prereleases&style=flat-square&logo=github&color=black" alt="Release"></a>
 <a href="https://golang.org/"><img src="https://img.shields.io/github/go-mod/go-version/bsv-blockchain/go-p2p-message-bus?style=flat-square&logo=go&color=00ADD8" alt="Go Version"></a>
-<a href="LICENSE"><img src="https://img.shields.io/badge/license-OpenBSV-blue?style=flat-square&logo=springsecurity&logoColor=white" alt="License"></a>
+<a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square&logo=springsecurity&logoColor=white" alt="License"></a>
 
 <br/>
 
@@ -259,10 +259,48 @@ client, err := p2p.NewPeer(p2p.Config{
 ```
 
 When enabled:
-- Connected peers are automatically saved to the specified file
+- Connected topic peers are saved to the specified file, at most once every 30 seconds
+- Each save merges into the existing file: peers not connected right now are kept until they are older than `PeerCacheTTL` (default 24h), and the newest 100 peers are kept
+- Only peers that have sent a valid message are cached; announcing a topic subscription is not enough
+- The file is replaced atomically (written to a temporary file in the same directory, then renamed), so its directory must be writable; it is also saved once more on `Close`
 - On restart, the client will reconnect to previously known peers
 - This significantly speeds up network reconnection
 - If not provided, peer caching is disabled
+
+**Resource Manager Limits:**
+
+The libp2p resource manager caps connections, streams and file descriptors. By default go-libp2p auto-scales these limits to the host's memory and file-descriptor limits, so the inbound connection limit can land in the low hundreds on a small host. Nodes that take heavy inbound churn, such as bootstrap or DHT server nodes, should set the limits explicitly with `ResourceLimits`:
+
+```go
+client, err := p2p.NewClient(p2p.Config{
+    Name:       "bootstrap1",
+    PrivateKey: privKey,
+    ResourceLimits: p2p.ResourceLimits{
+        Conns:        8192, // system-wide, inbound + outbound; must be >= MaxConnections
+        ConnsInbound: 4096,
+        FD:           8192,
+        // Optional per-subnet caps; a non-empty list replaces go-libp2p's default for that family.
+        IPv4SubnetLimits: []p2p.SubnetConnLimit{{PrefixLength: 32, Conns: 8}, {PrefixLength: 24, Conns: 32}},
+    },
+})
+```
+
+| Field | Scope | go-libp2p default when unset |
+|---|---|---|
+| `Conns`, `ConnsInbound`, `ConnsOutbound` | system | auto-scaled |
+| `Streams`, `StreamsInbound`, `StreamsOutbound` | system | auto-scaled |
+| `FD` | system | auto-scaled |
+| `PeerConns`, `PeerConnsInbound`, `PeerStreamsInbound` | each peer | auto-scaled |
+| `IPv4SubnetLimits` | each IPv4 subnet | 8 connections per address (/32) |
+| `IPv6SubnetLimits` | each IPv6 subnet | 8 per /56, 64 per /48 |
+
+- Zero (or an empty list) keeps the go-libp2p default for that field; a zero `ResourceLimits` leaves the resource manager entirely to go-libp2p, as before
+- Overrides apply on top of the auto-scaled defaults, so setting one field never changes another (raising `Conns` does not raise `ConnsOutbound`)
+- An inbound or outbound limit you set can't exceed its total, whether the total is set or auto-scaled: raising `ConnsInbound` above the auto-scaled `Conns` needs `Conns` set too, otherwise libp2p would silently cap it. Lowering only a total is fine; libp2p caps the unset directional limits at it
+- `FD` also caps inbound connections (each TCP connection holds a file descriptor), so raise it together with `ConnsInbound`
+- `NewClient` rejects negative values, a set inbound/outbound part larger than its effective total (`ConnsInbound > Conns`, `StreamsInbound > Streams`, `PeerConnsInbound > PeerConns`, ...), `Conns` below `MaxConnections`, and subnet entries with an out-of-range prefix or a non-positive count
+- The effective system limits are logged once at startup: `Resource manager system limits: conns=... inbound=... outbound=... streams=... fd=... memory=...`
+- The `libp2p_rcmgr_*` Prometheus metrics keep working and report the effective limits
 
 **Restricting Which Peers You Accept Messages From:**
 
@@ -292,6 +330,40 @@ When set:
 - An entry that is not a valid peer ID makes `NewClient` fail
 
 Filtering is on the authenticated libp2p peer ID of the message author, so it cannot be bypassed by a peer claiming another peer's `Name`. Note that this is an identity filter, not a content filter, and it does not protect against a compromised key belonging to a listed peer. It filters on authorship, not on freshness or liveness: a message an allowlisted publisher authored once can be replayed by any peer and will be delivered as new once libp2p's seen-cache window for it has passed, so reject stale or duplicate work at the application layer if that matters.
+
+**Validating Messages Before They Are Relayed:**
+
+GossipSub forwards a message to the mesh before `Subscribe` hands it to you, so a size check in your subscriber protects only your own node. `TopicValidators` runs before delivery and before forwarding:
+
+```go
+client, err := p2p.NewClient(p2p.Config{
+    Name:       "node1",
+    PrivateKey: privKey,
+    TopicValidators: map[string]p2p.TopicValidator{
+        "myapp-block": {
+            MaxPayloadSize: 10 * 1024,
+            // Optional, runs on the decoded payload; must be cheap and non-blocking.
+            Validate: func(ctx context.Context, from peer.ID, data []byte) pubsub.ValidationResult {
+                if !json.Valid(data) {
+                    return pubsub.ValidationReject
+                }
+                return pubsub.ValidationAccept
+            },
+        },
+    },
+})
+```
+
+- The key is the topic name exactly as passed to `Subscribe` and `Publish`
+- `MaxPayloadSize` is required. The raw envelope is size-checked before it is decoded, so an oversized message costs no decoding work
+- A failing message is rejected: it is neither delivered nor forwarded. With peer scoring on, pubsub charges the rejection to the peer that forwarded it, on topics whose score params weight invalid deliveries. `Validate` may return `ValidationIgnore` instead to drop without penalty
+- Messages the `AllowedPublisherIDs` filter drops are ignored, never rejected, so the allowlist's no-penalty promise holds
+- `Publish` sends `Name` sanitized to 64 printable bytes, the form receivers keep anyway, so a long name cannot push a payload over the limit
+- `Validate` receives the authenticated author's peer ID, not the peer that forwarded the message
+- Your own publishes pass the same validator; a rejected `Publish` returns a `pubsub.ValidationError`
+- Rejections are logged as one aggregate line per topic per interval: `Dropped N message(s) on topic <topic> that failed validation since the last report`
+
+`MaxMessageSize` overrides the pubsub wire limit (default 1MiB), but it limits whole RPC frames, not single messages. A peer packs several messages and control traffic into one frame sized by its own limit, and a frame over yours resets that peer's stream. Lower it only when every peer on the network runs the same lower limit; use `TopicValidators` to bound message sizes.
 
 **Kubernetes Support:**
 
@@ -368,7 +440,7 @@ Publishes a message to a topic. The message is broadcast to all peers subscribed
 func (c *Client) GetPeers() []PeerInfo
 ```
 
-Returns information about all known peers on subscribed topics.
+Returns the peers that authored a message on a joined topic and are connected now or were heard from within the last hour. At most 10,000 such authors are tracked; connected ones are always kept.
 
 **GetID**
 
@@ -629,4 +701,4 @@ The most basic way to show your support is to star :star2: the project, or to ra
 
 ## 📝 License
 
-[![License](https://img.shields.io/badge/license-OpenBSV-blue?style=flat&logo=springsecurity&logoColor=white)](LICENSE)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue?style=flat&logo=springsecurity&logoColor=white)](LICENSE)
