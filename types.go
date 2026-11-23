@@ -27,6 +27,14 @@ type Client interface {
 	// such authors are tracked; connected ones are always kept.
 	GetPeers() []PeerInfo
 
+	// PeerAddrs returns the remote multiaddrs of the open connections to
+	// peerID, the same strings GetPeers reports as Addrs, or nil if there are
+	// none or peerID does not decode. It answers from the connection table
+	// alone, in time proportional to that peer's connections, and does not
+	// consult the topic-author tracker, so it covers peers that have never
+	// authored a message.
+	PeerAddrs(peerID string) []string
+
 	// GetID returns this peer's ID as a string.
 	GetID() string
 
