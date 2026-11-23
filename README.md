@@ -442,6 +442,14 @@ func (c *Client) GetPeers() []PeerInfo
 
 Returns the peers that authored a message on a joined topic and are connected now or were heard from within the last hour. At most 10,000 such authors are tracked; connected ones are always kept.
 
+**PeerAddrs**
+
+```go
+func (c *Client) PeerAddrs(peerID string) []string
+```
+
+Returns the remote multiaddrs of the open connections to one peer, the same strings `GetPeers` reports as `Addrs`, or `nil` if there are none or `peerID` does not decode. It reads only the connection table, so its cost is proportional to that peer's connections rather than to the tracked authors, and it also covers connected peers that have never authored a message. Use it instead of scanning `GetPeers` when checking one peer at a time; `len(c.PeerAddrs(id)) > 0` tells whether the peer is connected.
+
 **GetID**
 
 ```go

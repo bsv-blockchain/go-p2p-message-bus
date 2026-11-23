@@ -868,20 +868,39 @@ func (c *client) GetPeers() []PeerInfo {
 	peers := make([]PeerInfo, 0, len(allTopicPeers))
 
 	for _, peerID := range allTopicPeers {
-		conns := c.host.Network().ConnsToPeer(peerID)
-		addrs := make([]string, 0, len(conns))
-		for _, conn := range conns {
-			addrs = append(addrs, conn.RemoteMultiaddr().String())
-		}
-
 		peers = append(peers, PeerInfo{
 			ID:    peerID.String(),
 			Name:  c.peerTracker.getName(peerID),
-			Addrs: addrs,
+			Addrs: remoteAddrs(c.host.Network().ConnsToPeer(peerID)),
 		})
 	}
 
 	return peers
+}
+
+// PeerAddrs returns the remote multiaddrs of the open connections to peerID;
+// see Client.PeerAddrs.
+func (c *client) PeerAddrs(peerID string) []string {
+	id, err := peer.Decode(peerID)
+	if err != nil {
+		return nil
+	}
+	conns := c.host.Network().ConnsToPeer(id)
+	if len(conns) == 0 {
+		return nil
+	}
+	return remoteAddrs(conns)
+}
+
+// remoteAddrs returns the remote multiaddr of each connection, in order. The
+// result is never nil, so GetPeers reports a peer without connections as
+// "Addrs": [].
+func remoteAddrs(conns []network.Conn) []string {
+	addrs := make([]string, 0, len(conns))
+	for _, conn := range conns {
+		addrs = append(addrs, conn.RemoteMultiaddr().String())
+	}
+	return addrs
 }
 
 // GetID returns this peer's ID as a string.
