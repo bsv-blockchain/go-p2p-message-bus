@@ -342,7 +342,8 @@ client, err := p2p.NewClient(p2p.Config{
     TopicValidators: map[string]p2p.TopicValidator{
         "myapp-block": {
             MaxPayloadSize: 10 * 1024,
-            // Optional, runs on the decoded payload; must be cheap and non-blocking.
+            // Optional, runs on the decoded payload; must be cheap, non-blocking,
+            // and must not modify data (subscribers receive the same slice).
             Validate: func(ctx context.Context, from peer.ID, data []byte) pubsub.ValidationResult {
                 if !json.Valid(data) {
                     return pubsub.ValidationReject
@@ -363,7 +364,7 @@ client, err := p2p.NewClient(p2p.Config{
 - Your own publishes pass the same validator; a rejected `Publish` returns a `pubsub.ValidationError`
 - Rejections are logged as one aggregate line per topic per interval: `Dropped N message(s) on topic <topic> that failed validation since the last report`
 
-`MaxMessageSize` overrides the pubsub wire limit (default 1MiB), but it limits whole RPC frames, not single messages. A peer packs several messages and control traffic into one frame sized by its own limit, and a frame over yours resets that peer's stream. Lower it only when every peer on the network runs the same lower limit; use `TopicValidators` to bound message sizes.
+`MaxMessageSize` overrides the pubsub wire limit (default 1MiB), but it limits whole RPC frames, not single messages. A peer packs several messages and control traffic into one frame sized by its own limit, and a frame over the receiver's limit resets the stream. That cuts both ways: lowered, you reset streams from peers on the default; raised, peers on the default reset the streams you send larger frames on. Change it only when every peer on the network runs the same limit; use `TopicValidators` to bound message sizes.
 
 **Kubernetes Support:**
 

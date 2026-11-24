@@ -42,6 +42,9 @@ type TopicValidator struct {
 	// It runs inline on pubsub's validation workers, for every inbound message
 	// on the topic and for this node's own publishes, so it must be cheap and
 	// must not block: a slow Validate stalls validation for every topic.
+	//
+	// Validate must not modify data: it is the same slice subscribers later
+	// receive as Message.Data.
 	Validate func(ctx context.Context, from peer.ID, data []byte) pubsub.ValidationResult
 }
 
