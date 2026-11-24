@@ -82,9 +82,11 @@ func newConnAdmission(allowPrivateIPs bool) (*connAdmission, error) {
 }
 
 // refuses reports whether the gater would refuse a connection to peer p at
-// remote address addr: p is blocked, or addr is an IP address that is blocked
-// or inside a blocked subnet. An address without an IP (a relay circuit) is
-// judged by its peer alone.
+// remote address addr: p is blocked, or the leading IP of addr is blocked or
+// inside a blocked subnet. As in the gater, a relayed connection's address
+// starts with the relay's IP, so an IP rule on a relay covers every
+// connection through it, and a peer behind a relay is matched by its peer ID
+// alone. An address with no leading IP is judged by its peer alone.
 func (a *connAdmission) refuses(p peer.ID, addr multiaddr.Multiaddr) bool {
 	if !a.gater.InterceptPeerDial(p) {
 		return true

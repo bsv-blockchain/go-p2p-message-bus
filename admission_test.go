@@ -239,7 +239,9 @@ func TestConnAdmissionRefuses(t *testing.T) {
 	require.NoError(t, a.gater.BlockSubnet(mustCIDR(t, "2001:db8::/32")))
 	require.NoError(t, a.gater.BlockPeer(blocked))
 
-	circuit := fmt.Sprintf("/ip4/203.0.113.9/tcp/4001/p2p/%s/p2p-circuit", newTestPeerID(t))
+	relay := newTestPeerID(t)
+	circuit := fmt.Sprintf("/ip4/203.0.113.9/tcp/4001/p2p/%s/p2p-circuit", relay)
+	blockedRelay := fmt.Sprintf("/ip4/192.0.2.1/tcp/4001/p2p/%s/p2p-circuit", relay)
 	tests := []struct {
 		name   string
 		peer   peer.ID
@@ -255,8 +257,11 @@ func TestConnAdmissionRefuses(t *testing.T) {
 		{name: "inside ipv6 subnet", peer: allowed, addr: "/ip6/2001:db8::1/tcp/1", refuse: true},
 		{name: "outside ipv6 subnet", peer: allowed, addr: "/ip6/2001:db9::1/tcp/1"},
 		{name: "blocked peer on clean address", peer: blocked, addr: "/ip4/203.0.113.1/tcp/1", refuse: true},
-		{name: "relay circuit, allowed peer", peer: allowed, addr: circuit},
-		{name: "relay circuit, blocked peer", peer: blocked, addr: circuit, refuse: true},
+		{name: "circuit via clean relay, allowed peer", peer: allowed, addr: circuit},
+		{name: "circuit via clean relay, blocked peer", peer: blocked, addr: circuit, refuse: true},
+		{name: "circuit via blocked relay IP, allowed peer", peer: allowed, addr: blockedRelay, refuse: true},
+		{name: "no leading IP, allowed peer", peer: allowed, addr: "/dns4/example.com/tcp/1"},
+		{name: "no leading IP, blocked peer", peer: blocked, addr: "/dns4/example.com/tcp/1", refuse: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -396,17 +401,23 @@ func TestBlockPeerRefusesOnAnyAddress(t *testing.T) {
 	}, eventuallyTimeout, eventuallyTick)
 
 	g.assertRefused(t, loopback4)
-	g.assertRefused(t, loopback6)
 
-	// Another peer on the same address is unaffected.
-	other := newGatedTrio(t, true)
-	g.in, g.out = other.in, other.out
-	g.assertAdmitted(t, loopback4)
+	t.Run("refused over ipv6 too", func(t *testing.T) {
+		g.assertRefused(t, loopback6)
+	})
 
-	g.in, g.out = other.a, other.a
-	require.NoError(t, g.a.BlockPeer(other.a.host.ID().String()))
-	require.NoError(t, g.a.UnblockPeer(other.a.host.ID().String()))
-	require.NoError(t, dialOnly(t, g.a, other.a, listenAddr(t, other.a, loopback4)))
+	t.Run("another peer on the same address unaffected", func(t *testing.T) {
+		other := newGatedTrio(t, true)
+		o := gatedTrio{a: g.a, in: other.in, out: other.out}
+		o.assertAdmitted(t, loopback4)
+	})
+
+	t.Run("unblock restores", func(t *testing.T) {
+		for _, other := range []*client{g.in, g.out} {
+			require.NoError(t, g.a.UnblockPeer(other.host.ID().String()))
+		}
+		g.assertAdmitted(t, loopback4)
+	})
 }
 
 // While AllowPrivateIPs is false, no caller unblock lifts a built-in range:
