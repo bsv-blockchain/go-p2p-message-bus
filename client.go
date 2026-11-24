@@ -494,15 +494,14 @@ func buildHostOptions(config Config, log logger, cancel context.CancelFunc) ([]l
 	hostOpts = append(hostOpts, libp2p.ConnectionManager(connMgr))
 	log.Infof("Connection manager configured: min=%d, max=%d, grace=%v", minConns, maxConns, gracePeriod)
 
-	// Add connection gater to block private IPs if AllowPrivateIPs is false (default)
-	if !config.AllowPrivateIPs {
-		ipFilter, err := createPrivateIPConnectionGater(log, cancel)
-		if err != nil {
-			return nil, err
-		}
+	// Private-IP filter (unless AllowPrivateIPs) and/or the caller's gater.
+	gaters, err := hostGaters(config, log, cancel)
+	if err != nil {
+		return nil, err
+	}
 
-		hostOpts = append(hostOpts, libp2p.ConnectionGater(ipFilter))
-		log.Infof("Private IP connection gater enabled (blocking RFC1918 and local addresses)")
+	if len(gaters) > 0 {
+		hostOpts = append(hostOpts, libp2p.ConnectionGater(gaters))
 	}
 
 	// Configure announce addresses if provided (useful for K8s)

@@ -366,6 +366,31 @@ client, err := p2p.NewClient(p2p.Config{
 
 `MaxMessageSize` overrides the pubsub wire limit (default 1MiB), but it limits whole RPC frames, not single messages. A peer packs several messages and control traffic into one frame sized by its own limit, and a frame over the receiver's limit resets the stream. That cuts both ways: lowered, you reset streams from peers on the default; raised, peers on the default reset the streams you send larger frames on. Change it only when every peer on the network runs the same limit; use `TopicValidators` to bound message sizes.
 
+**Refusing and Dropping Peers (Bans):**
+
+`ConnectionGater` takes any libp2p `connmgr.ConnectionGater`, which libp2p consults on every outbound dial and inbound accept. Use it to enforce your own peer, address or subnet bans. `DisconnectPeer` closes the connections to a peer that is already connected; it is not part of `Client`, so reach it through the `PeerDisconnector` interface:
+
+```go
+gater, _ := conngater.NewBasicConnectionGater(nil)
+
+client, err := p2p.NewClient(p2p.Config{
+    Name:            "node1",
+    PrivateKey:      privKey,
+    ConnectionGater: gater,
+})
+
+// Ban a peer: refuse it from now on, then drop its current connections.
+_ = gater.BlockPeer(badPeer)
+_ = client.(p2p.PeerDisconnector).DisconnectPeer(ctx, badPeer)
+```
+
+- Unless `AllowPrivateIPs` is set, the built-in private-IP filter still runs, in front of your gater; a connection is admitted only if both admit it
+- The gater's methods sit on the dial and accept path, so they must be fast and must not block
+- Outbound dials are refused before any connection is made. Inbound, an address or subnet ban refuses the connection before any handshake, but a peer-ID ban can only act once the security handshake has authenticated the peer, so each redial from a banned peer ID still costs one handshake
+- `DisconnectPeer` returns an error after `Close`
+- `DisconnectPeer` alone does not keep a peer away: it can redial, and the client redials bootstrap, static and discovered peers within seconds. Refuse the peer in the gater as well
+- Disconnecting a peer that is not connected is not an error
+
 **Kubernetes Support:**
 
 The `AnnounceAddrs` field allows you to specify the external addresses that your peer should advertise. This is essential in Kubernetes where the pod's internal IP differs from the externally accessible address:

@@ -5,6 +5,7 @@ import (
 	"time"
 
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
+	"github.com/libp2p/go-libp2p/core/connmgr"
 	"github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/peer"
 )
@@ -247,6 +248,25 @@ type Config struct {
 	// Default: false (private IPs filtered for production safety)
 	// Set to true only for local development or private network deployments
 	AllowPrivateIPs bool
+
+	// ConnectionGater optionally lets the caller refuse connections, e.g. to
+	// enforce its own peer, address or subnet bans. libp2p consults it on
+	// every outbound dial and inbound accept, so its methods must be fast and
+	// must not block. Outbound dials are refused before any connection is
+	// made. Inbound, an address or subnet is refused before any handshake,
+	// but the remote peer ID is only known, and so only refused, after the
+	// security handshake.
+	//
+	// Must be nil or a usable gater: a typed nil (e.g. a nil
+	// *conngater.BasicConnectionGater) is installed and panics on first use.
+	//
+	// When AllowPrivateIPs is false the private-IP filter is still applied,
+	// in front of this gater: a connection is admitted only if both admit it.
+	//
+	// Pair it with DisconnectPeer (see PeerDisconnector) to drop a peer that
+	// is already connected; the gater only stops it coming back.
+	// Default: nil (no caller gater).
+	ConnectionGater connmgr.ConnectionGater
 
 	// MaxConnections is the high water mark for total peer connections.
 	// When this limit is reached, the connection manager will prune low-value connections
