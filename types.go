@@ -3,6 +3,7 @@ package p2p
 import (
 	"container/list"
 	"context"
+	"net"
 	"strings"
 	"sync"
 	"time"
@@ -34,6 +35,49 @@ type Client interface {
 	// consult the topic-author tracker, so it covers peers that have never
 	// authored a message.
 	PeerAddrs(peerID string) []string
+
+	// BlockAddr refuses every new connection to or from ip, inbound and
+	// outbound, and closes the open connections whose remote address is ip.
+	// An IPv4 address and its IPv4-mapped IPv6 form are the same address. A
+	// relayed connection's remote address is the relay's, so blocking a
+	// relay's IP drops every connection through it, and a host that reaches
+	// this one through a relay is refused only by BlockPeer.
+	// Rules are kept in memory only and are lost on Close; a caller that
+	// persists a ban list re-applies it after NewClient. Returns ErrInvalidIP
+	// if ip is nil or malformed. Safe for concurrent use, and a no-op on the
+	// connection table after Close.
+	BlockAddr(ip net.IP) error
+
+	// UnblockAddr removes a BlockAddr rule for ip. It does not lift a
+	// BlockSubnet rule or a built-in private-range block that also covers ip.
+	// Returns ErrInvalidIP if ip is nil or malformed.
+	UnblockAddr(ip net.IP) error
+
+	// BlockSubnet refuses every new connection to or from an address inside
+	// ipnet, inbound and outbound, and closes the open connections whose
+	// remote address is inside it. Host bits are ignored: 10.1.2.3/8 is the
+	// rule 10.0.0.0/8. Relays, memory-only rules and concurrency as for
+	// BlockAddr. Returns
+	// ErrInvalidSubnet if ipnet is nil, its mask is not a CIDR prefix, or its
+	// IP does not fit the mask.
+	BlockSubnet(ipnet *net.IPNet) error
+
+	// UnblockSubnet removes a BlockSubnet rule for exactly ipnet (after host
+	// bits are cleared); it does not split or shrink a wider rule. While
+	// Config.AllowPrivateIPs is false, unblocking one of the built-in
+	// private, loopback or link-local ranges returns nil and leaves that
+	// range blocked. Returns ErrInvalidSubnet as BlockSubnet.
+	UnblockSubnet(ipnet *net.IPNet) error
+
+	// BlockPeer refuses every new connection to or from peerID, on any
+	// address, and closes the open connections to it. Memory-only and
+	// concurrency-safe as BlockAddr. Returns an error wrapping
+	// ErrInvalidPeerID if peerID does not decode.
+	BlockPeer(peerID string) error
+
+	// UnblockPeer removes a BlockPeer rule for peerID. Returns an error
+	// wrapping ErrInvalidPeerID if peerID does not decode.
+	UnblockPeer(peerID string) error
 
 	// GetID returns this peer's ID as a string.
 	GetID() string

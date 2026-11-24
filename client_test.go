@@ -639,7 +639,7 @@ func TestBuildHostOptionsWithAnnounceAddrs(t *testing.T) {
 				AnnounceAddrs: tt.announceAddrs,
 			}
 
-			opts, err := buildHostOptions(config, logger, cancel)
+			opts, admission, err := buildHostOptions(config, logger, cancel)
 
 			if tt.wantErr {
 				require.Error(t, err)
@@ -649,6 +649,7 @@ func TestBuildHostOptionsWithAnnounceAddrs(t *testing.T) {
 			} else {
 				require.NoError(t, err)
 				require.NotNil(t, opts)
+				require.NotNil(t, admission)
 				// At minimum should have identity option
 				assert.NotEmpty(t, opts)
 			}

@@ -451,6 +451,23 @@ func (c *Client) PeerAddrs(peerID string) []string
 
 Returns the remote multiaddrs of the open connections to one peer, the same strings `GetPeers` reports as `Addrs`, or `nil` if there are none or `peerID` does not decode. It reads only the connection table, so its cost is proportional to that peer's connections rather than to the tracked authors, and it also covers connected peers that have never authored a message. Use it instead of scanning `GetPeers` when checking one peer at a time; `len(c.PeerAddrs(id)) > 0` tells whether the peer is connected.
 
+**BlockAddr / BlockSubnet / BlockPeer**
+
+```go
+func (c *Client) BlockAddr(ip net.IP) error
+func (c *Client) UnblockAddr(ip net.IP) error
+func (c *Client) BlockSubnet(ipnet *net.IPNet) error
+func (c *Client) UnblockSubnet(ipnet *net.IPNet) error
+func (c *Client) BlockPeer(peerID string) error
+func (c *Client) UnblockPeer(peerID string) error
+```
+
+Enforce a ban list at connection admission rather than only on the message path. A block refuses new connections in both directions, dialed in or out, and closes the open connections it matches: `BlockAddr` those whose remote IP is `ip` (an IPv4 address and its IPv4-mapped IPv6 form are the same), `BlockSubnet` those whose remote IP is inside `ipnet` (host bits are ignored), `BlockPeer` every connection to that peer on any address. A connection whose handshake was already under way when the block was added is closed as soon as it completes.
+
+These rules govern who this node is connected to, not whose messages it sees: GossipSub relays messages, so a blocked peer's messages can still arrive through other neighbours. A relayed connection's remote address is the relay's, so an IP or subnet rule that covers a relay drops every connection through it, and a host that comes in through a relay is refused only by `BlockPeer`.
+
+Rules live in memory and are lost on `Close`; a caller that persists its ban list re-applies it after `NewClient`. `UnblockSubnet` removes only the exact rule given; it does not split a wider one. While `AllowPrivateIPs` is false the private, loopback and link-local ranges are built-in rules on the same gater, and no unblock call lifts them. Invalid input returns `ErrInvalidIP`, `ErrInvalidSubnet` or an error wrapping `ErrInvalidPeerID`. All six are safe for concurrent use and after `Close`.
+
 **GetID**
 
 ```go
