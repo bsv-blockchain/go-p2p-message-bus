@@ -352,9 +352,11 @@ type Config struct {
 	// This limit bounds whole RPC frames, not single messages: a peer packs
 	// several messages, IWANT replies and control traffic into one frame, sized
 	// by its own limit. A frame over this node's limit resets the stream from
-	// that peer, dropping everything in flight on it. Lowering it below what
-	// other peers on the network use therefore loses legitimate traffic. Use
-	// TopicValidators to bound message sizes; lower this only on a network where
-	// every peer runs the same, lower limit.
+	// that peer, dropping everything in flight on it. The mismatch bites in both
+	// directions: lowered below what other peers use, this node resets their
+	// streams; raised above it, peers still on the default reset the streams
+	// this node sends larger frames on. Use TopicValidators to bound message
+	// sizes, and change this only on a network where every peer runs the same
+	// limit.
 	MaxMessageSize int
 }
