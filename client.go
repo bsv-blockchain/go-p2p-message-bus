@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"path/filepath"
 	"slices"
@@ -32,7 +31,6 @@ import (
 	"github.com/libp2p/go-libp2p/core/protocol"
 	"github.com/libp2p/go-libp2p/p2p/discovery/mdns"
 	drouting "github.com/libp2p/go-libp2p/p2p/discovery/routing"
-	"github.com/libp2p/go-libp2p/p2p/net/conngater"
 	"github.com/libp2p/go-libp2p/p2p/net/connmgr"
 	"github.com/libp2p/go-libp2p/p2p/transport/tcp"
 	"github.com/multiformats/go-multiaddr"
@@ -176,6 +174,9 @@ type client struct {
 	// connNotifee watches connections for topic peers. It is registered once
 	// per client and removed on Close.
 	connNotifee *network.NotifyBundle
+	// admission is the host's connection gater; Block and Unblock calls
+	// change its rules.
+	admission *connAdmission
 	// shutdownOnce runs the pre-cancel part of Close exactly once, so a
 	// concurrent second Close waits for the final cache save instead of
 	// cancelling the context under it.
@@ -222,7 +223,7 @@ func NewClient(config Config) (Client, error) {
 	}
 
 	// Build host options
-	hostOpts, err := buildHostOptions(config, clientLogger, cancel)
+	hostOpts, admission, err := buildHostOptions(config, clientLogger, cancel)
 	if err != nil {
 		return nil, err
 	}
@@ -306,6 +307,8 @@ func NewClient(config Config) (Client, error) {
 
 		peerCacheSaveReq:   make(chan struct{}, 1),
 		peerCacheSaveDelay: peerCacheSaveInterval,
+
+		admission: admission,
 	}
 	if config.peerCacheSaveInterval > 0 {
 		c.peerCacheSaveDelay = config.peerCacheSaveInterval
@@ -319,7 +322,12 @@ func NewClient(config Config) (Client, error) {
 	}
 
 	c.connNotifee = &network.NotifyBundle{
-		ConnectedF:    func(_ network.Network, conn network.Conn) { go c.onConnected(conn) },
+		ConnectedF: func(_ network.Network, conn network.Conn) {
+			if c.closeIfRefused(conn) {
+				return
+			}
+			go c.onConnected(conn)
+		},
 		DisconnectedF: func(_ network.Network, conn network.Conn) { go c.onDisconnected(conn) },
 	}
 	h.Network().Notify(c.connNotifee)
@@ -428,48 +436,9 @@ func resolveAllowlist(config Config, log logger, cancel context.CancelFunc) (*pe
 	return allowlist, nil
 }
 
-// createPrivateIPConnectionGater creates a ConnectionGater that blocks private IP ranges.
-// Returns a configured BasicConnectionGater that prevents connections to/from:
-// - RFC1918 private networks (10.x, 172.16-31.x, 192.168.x)
-// - Link-local addresses (169.254.x, fe80::)
-// - Loopback addresses (127.x, ::1)
-// - Shared address space (100.64.x)
-// - IPv6 unique local addresses (fc00::)
-func createPrivateIPConnectionGater(log logger, cancel context.CancelFunc) (*conngater.BasicConnectionGater, error) {
-	ipFilter, err := conngater.NewBasicConnectionGater(nil)
-	if err != nil {
-		cancel()
-		return nil, fmt.Errorf("failed to create connection gater: %w", err)
-	}
-
-	// Standard private IP ranges to block
-	privateRanges := []string{
-		"10.0.0.0/8",     // RFC1918 private network
-		"172.16.0.0/12",  // RFC1918 private network
-		"192.168.0.0/16", // RFC1918 private network
-		"127.0.0.0/8",    // Loopback
-		"169.254.0.0/16", // Link-local
-		"100.64.0.0/10",  // Shared Address Space (RFC6598)
-		"fc00::/7",       // IPv6 Unique Local Addresses
-		"fe80::/10",      // IPv6 Link-Local Addresses
-		"::1/128",        // IPv6 Loopback
-	}
-
-	for _, cidr := range privateRanges {
-		_, ipnet, err := net.ParseCIDR(cidr)
-		if err != nil {
-			cancel()
-			return nil, fmt.Errorf("failed to parse CIDR %s: %w", cidr, err)
-		}
-		if err := ipFilter.BlockSubnet(ipnet); err != nil {
-			log.Warnf("Failed to block subnet %s: %v", cidr, err)
-		}
-	}
-
-	return ipFilter, nil
-}
-
-func buildHostOptions(config Config, log logger, cancel context.CancelFunc) ([]libp2p.Option, error) {
+// buildHostOptions returns the libp2p options for the host and the connection
+// gater they install, which the client keeps for its Block and Unblock calls.
+func buildHostOptions(config Config, log logger, cancel context.CancelFunc) ([]libp2p.Option, *connAdmission, error) {
 	hostOpts := []libp2p.Option{libp2p.Identity(config.PrivateKey)}
 
 	// Explicitly configure only TCP transport to prevent WebRTC's mDNS usage
@@ -488,20 +457,21 @@ func buildHostOptions(config Config, log logger, cancel context.CancelFunc) ([]l
 	)
 	if err != nil {
 		cancel()
-		return nil, fmt.Errorf("failed to create connection manager: %w", err)
+		return nil, nil, fmt.Errorf("failed to create connection manager: %w", err)
 	}
 
 	hostOpts = append(hostOpts, libp2p.ConnectionManager(connMgr))
 	log.Infof("Connection manager configured: min=%d, max=%d, grace=%v", minConns, maxConns, gracePeriod)
 
-	// Add connection gater to block private IPs if AllowPrivateIPs is false (default)
+	// One connection gater on every host: it carries the caller's Block rules
+	// and, unless AllowPrivateIPs is set, the built-in private-range blocks.
+	admission, err := newConnAdmission(config.AllowPrivateIPs)
+	if err != nil {
+		cancel()
+		return nil, nil, err
+	}
+	hostOpts = append(hostOpts, libp2p.ConnectionGater(admission.gater))
 	if !config.AllowPrivateIPs {
-		ipFilter, err := createPrivateIPConnectionGater(log, cancel)
-		if err != nil {
-			return nil, err
-		}
-
-		hostOpts = append(hostOpts, libp2p.ConnectionGater(ipFilter))
 		log.Infof("Private IP connection gater enabled (blocking RFC1918 and local addresses)")
 	}
 
@@ -512,7 +482,7 @@ func buildHostOptions(config Config, log logger, cancel context.CancelFunc) ([]l
 			maddr, err := multiaddr.NewMultiaddr(addrStr)
 			if err != nil {
 				cancel()
-				return nil, fmt.Errorf("invalid announce address %s: %w", addrStr, err)
+				return nil, nil, fmt.Errorf("invalid announce address %s: %w", addrStr, err)
 			}
 			announceAddrs = append(announceAddrs, maddr)
 		}
@@ -528,10 +498,10 @@ func buildHostOptions(config Config, log logger, cancel context.CancelFunc) ([]l
 	rcmgrOpts, rcmgrErr := resourceManagerOptions(config.ResourceLimits, maxConns)
 	if rcmgrErr != nil {
 		cancel()
-		return nil, rcmgrErr
+		return nil, nil, rcmgrErr
 	}
 
-	return append(hostOpts, rcmgrOpts...), nil
+	return append(hostOpts, rcmgrOpts...), admission, nil
 }
 
 // connManagerSettings returns the connection manager's low and high water
